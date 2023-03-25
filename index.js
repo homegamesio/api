@@ -694,33 +694,33 @@ const listGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, re
 const getGameDetails = (gameId) => new Promise((resolve, reject) => { 
 
     getGame(gameId).then(gameDetails => {
-    	const client = new aws.DynamoDB.DocumentClient({
-    	    region: process.env.DYNAMO_REGION
-    	});
+        const client = new aws.DynamoDB.DocumentClient({
+            region: process.env.DYNAMO_REGION
+        });
 
-    	const params = {
-    	    TableName: 'game_versions',
-    	    // IndexName: 'name_index',
-    	    KeyConditionExpression: '#game_id = :game_id',
-    	    ExpressionAttributeNames: {
-    	        '#game_id': 'game_id'
-    	    },
-    	    ExpressionAttributeValues: {
-    	        ':game_id': gameId
-    	    }
-    	};
+        const params = {
+            TableName: 'game_versions',
+            // IndexName: 'name_index',
+            KeyConditionExpression: '#game_id = :game_id',
+            ExpressionAttributeNames: {
+                '#game_id': 'game_id'
+            },
+            ExpressionAttributeValues: {
+                ':game_id': gameId
+            }
+        };
 
-    	client.query(params, (err, data) => {
-    	    if (err) {
-    	        console.log(err);
-    	        reject(err);
-    	    } else {
-    	        resolve({
-		    ...gameDetails,
-    	            versions: data.Items.map(mapGameVersion)
-    	        });
-    	    }
-    	});
+        client.query(params, (err, data) => {
+            if (err) {
+                console.log(err);
+                reject(err);
+            } else {
+                resolve({
+            ...gameDetails,
+                    versions: data.Items.map(mapGameVersion)
+                });
+            }
+        });
     });
 });
 
@@ -1019,25 +1019,568 @@ const requestActionRegex = '/admin/request/(\\S*)/action';
 const createAssetRegex = '/asset';
 const createGameRegex = '/games';
 
+const contactRegex = '/contact';
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
     const requestHandlers = {
-        'GET': {
-            '/': {
+        'POST': {
+            [contactRegex]: {
                 handle: () => {
-                    res.end('hello world!');
+                    getReqBody(req, (_body) => {
+                        console.log('got this message');
+                        console.log(_body);
+                        const body = JSON.parse(_body);
+
+                        const bodyText = body.message || 'Empty message';
+
+                        const bodyEmail = body.email || 'No email provided';
+
+                        const emailParams = {
+                            Destination: {
+                                ToAddresses: [
+                                    'support@homegames.io'
+                                ]
+                            },
+                            Message: {
+                                Body: {
+                                    Text: {
+                                        Charset: 'UTF-8',
+                                        Data: `Email: ${bodyEmail}\n\nMessage:${bodyText}`
+                                    }
+                                },
+                                Subject: {
+                                    Charset: 'UTF-8',
+                                    Data: 'New Homegames Support Form Message'
+                                }
+                            },
+                            Source: "support-form@homegames.io"
+                        };
+
+                        const ses = new aws.SES({region: 'us-west-2'});
+
+                        ses.sendEmail(emailParams, (err, data) => {
+                            res.end(JSON.stringify({
+                                success: !(!!err)
+                            }));
+                        });
+                    });
                 }
             },
-            '/health': {
+            [createGameRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    const form = new multiparty.Form();
+                    form.parse(req, (err, fields, files) => {
+                        if (err) {
+                            console.error('error parsing form');
+                            console.error(err);
+                            res.end('error');
+                        } else {
+                            if (!files.thumbnail || !files.thumbnail.length || !fields.name || !fields.name.length || !fields.description || !fields.description.length) {
+                                res.end('creation requires name, thumbnail & description');
+                            } else {
+                                const gameId = generateId();
+                                uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
+                                    const nowString = '' + Date.now();
+                                    const params = {
+                                        RequestItems: {
+                                            [process.env.GAME_TABLE]: [{
+                                                PutRequest: {
+                                                    Item: {
+                                                        'game_id': {
+                                                            S: gameId
+                                                        },
+                                                        'created_by': {
+                                                            S: userId 
+                                                        },
+                                                        'name': {
+                                                            S: fields.name[0]
+                                                        },
+                                                        'created_on': {
+                                                            N: nowString
+                                                        },
+                                                        'updated': {
+                                                            N: nowString
+                                                        },
+                                                        'description': {
+                                                            S: fields.description[0] 
+                                                        },
+                                                        'thumbnail': {
+                                S: url.replace('https://assets.homegames.io/', '') 
+                                                        }
+                                                    }
+                                                }
+                                            }]
+                                        }
+                                    };
+        
+                                    const client = new aws.DynamoDB({
+                                        region: 'us-west-2'
+                                    });
+                                    client.batchWriteItem(params, (err, putResult) => {
+                                        if (!err) {
+                                            res.writeHead(200, {
+                                                'Content-Type': 'application/json'
+                                            });
+                                            res.end(JSON.stringify(mapGame(params.RequestItems[process.env.GAME_TABLE][0].PutRequest.Item)));
+                                        } else {
+                                            console.log(err);
+                                            res.end('error');
+                                        }
+                                    });
+    
+                                });
+                            }
+                        }
+                    });
+                }
+            },
+            [createAssetRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    const form = new multiparty.Form();
+                    form.parse(req, (err, fields, files) => {
+                        if (!files) {
+                            res.end('no');
+                        } else {
+                            const fileValues = Object.values(files);
+    
+                            let hack = false;
+    
+                            const uploadedFiles = fileValues[0].map(f => {
+    
+                                if (hack) {
+                                    return;
+                                }
+    
+                                hack = true;
+    
+                                if (f.size > MAX_SIZE) {
+                                    res.writeHead(400);
+                                    res.end('File size exceeds ' + MAX_SIZE + ' bytes');
+                                } else {
+                                    const assetId = getHash(uuidv4());
+    
+                                    createRecord(userId, assetId, f.size, f.originalFilename, {
+                                        'Content-Type': f.headers['content-type']
+                                    }).then(() => {
+    
+                                        const childSession = fork(path.join(__dirname, 'upload.js'),
+                                            [
+                                                `--path=${f.path}`,
+                                                `--developer=${userId}`,
+                                                `--id=${assetId}`,
+                                                `--name=${f.originalFilename}`,
+                                                `size=${f.size}`,
+                                                `type=${f.headers['content-type']}`
+                                            ]
+                                        );
+                                        res.writeHead(200, {
+                                            'Content-Type': 'application/json'
+                                        });
+                                        res.end(JSON.stringify({
+                                            assetId
+                                        }));
+    
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+
+            },
+            [gamePublishRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    const form = new multiparty.Form();
+    
+                    getReqBody(req, (_data) => {
+                        const data = JSON.parse(_data);
+                        const _gamePublishRegex = new RegExp('/games/(\\S*)/publish');
+                        const gameId = _gamePublishRegex.exec(req.url)[1];
+    
+                        const publishData = {
+                            commit: data.commit,
+                            requester: userId,
+                            owner: data.owner,
+                            repo: data.repo,
+                            gameId
+                        };
+    
+                        const buildSourceInfoHash = ({sourceType, commit, owner, repo}) => {
+                            const stringConcat = `${sourceType}${commit}${owner}${repo}`;
+                            return crypto.createHash('md5').update(stringConcat).digest('hex');
+                        };
+    
+                        const verifyNoExistingPublishRequest = ({commit, owner, repo, gameId, requester}) => new Promise((resolve, reject) => {
+    
+                            const sourceInfoHash = buildSourceInfoHash({sourceType: SourceType.GITHUB, commit, owner, repo});
+    
+                            const readClient = new aws.DynamoDB.DocumentClient({
+                                region: 'us-west-2'
+                            });
+    
+                            const readParams = {
+                                TableName: 'publish_requests',
+                                Key: {
+                                    'game_id': gameId,
+                                    'source_info_hash': sourceInfoHash
+                                }
+                            };
+    
+                            readClient.get(readParams, (err, data) => {
+                                // todo: handle error separately
+                                if (err || data.Item) {
+                                    reject();
+                                } else {
+                                    resolve();
+                                }
+                            });
+                        });
+    
+                        const createPublishRequest = ({commit, owner, repo, gameId, requester}) => new Promise((resolve, reject) => {
+                
+                            const sourceInfoHash = buildSourceInfoHash({sourceType: SourceType.GITHUB, commit, owner, repo});
+    
+                            const client = new aws.DynamoDB({
+                                region: 'us-west-2'
+                            });
+    
+                            const requestId = `${gameId}:${sourceInfoHash}`;
+    
+                            const params = {
+                                TableName: 'publish_requests',
+                                Item: {
+                                    'request_id': {
+                                        S: requestId
+                                    },
+                                    'commit_hash': {
+                                        S: commit
+                                    },
+                                    'repo_owner': {
+                                        S: owner
+                                    },
+                                    'repo_name': {
+                                        S: repo
+                                    },
+                                    'game_id': {
+                                        S: gameId
+                                    },
+                                    'requester': {
+                                        S: requester
+                                    }, 
+                                    'source_info_hash': {
+                                        S: sourceInfoHash
+                                    },
+                                    'created': {
+                                        N: `${Date.now()}`
+                                    },
+                                    'status': {
+                                        S: 'SUBMITTED'
+                                    }
+                                }
+                            };
+                
+                            client.putItem(params, (err, putResult) => {
+                                if (!err) {
+                                    resolve({sourceInfoHash, gameId});
+                                } else {
+                                    reject(err);
+                                }
+                            });
+                        });
+    
+                        verifyNoExistingPublishRequest(publishData).then(() => {
+                            createPublishRequest(publishData).then((publishRecord) => {
+                                const messageBody = JSON.stringify(publishRecord);
+    
+                                const sqsParams = {
+                                    MessageBody: messageBody,
+                                    QueueUrl: process.env.SQS_QUEUE_URL,
+                                    MessageGroupId: Date.now() + '',
+                                    MessageDeduplicationId: publishRecord.sourceInfoHash
+                                };
+    
+                                const sqs = new aws.SQS({region: 'us-west-2'});
+    
+                                sqs.sendMessage(sqsParams, (err, sqsResponse) => {
+                                    console.log(err);
+                                    console.log(sqsResponse);
+                                    res.end('created publish request');
+                                });
+                            }).catch((err) => {
+                                console.error('sqs error');
+                                console.error(err);
+                                res.writeHead(500);
+                                res.end('Failed to create publish request');
+                            });
+                        }).catch(() => {
+                            res.writeHead(400);
+                            res.end('Publish request already exists');
+                        });
+                    });
+                }
+
+            },
+            [gameUpdateRegex]: {
+                requiresAuth: true,
+                handle: (userId, gameId) => {
+                    getReqBody(req, (_data) => {
+                        const data = JSON.parse(_data);
+    
+                        const changed = data.description || data.thumbnail;
+    
+                        if (changed) {
+                            getGame(gameId).then(game => {
+                                console.log('got game!');
+                                console.log(game);
+                                if (userId != game.createdBy) {
+                                    res.writeHead(400, {
+                                        'Content-Type': 'text/plain'
+                                    });
+                                    res.end('You cannot modify a game that you didnt create');
+                                } else {
+                                    if (data.description != game.description) {
+                                        updateGame(gameId, {description: data.description}).then((_game) => {
+                                            // sigh. 
+                                            setTimeout(() => {
+                                                res.writeHead(200, {
+                                                    'Content-Type': 'application/json'
+                                                });
+                                                res.end(JSON.stringify(_game));
+                                            }, 250);
+                                        });
+                                    } else {
+                                        res.end('hmmm');
+                                    }
+                                }
+                            }).catch(err => {
+                                res.end(err.toString());
+                            });
+                        } else {
+                            res.writeHead(400, {
+                                'Content-Type': 'text/plain'
+                            });
+                            res.end('No valid changes');
+                        }
+                    });
+                }
+            },
+            [submitPublishRequestRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getReqBody(req, (_data) => {
+                        const data = JSON.parse(_data);
+
+            const { requestId } = data;
+            getPublishRequest(requestId).then(requestData => {
+                            updatePublishRequestState(requestData.game_id, requestData.source_info_hash, 'PENDING_PUBLISH_APPROVAL').then(() => {
+                                        res.end('ok');
+                                }).catch(err => {
+                    res.end(err.toString());
+                });
+                            }).catch(err => {
+                                res.end(err.toString());
+                            });
+                    });
+                }
+            },
+            [requestActionRegex]: {
+                requiresAuth: true,
+                handle: (userId, requestId) => {
+                    getCognitoUser(userId).then(userData => {
+                        const _requestActionRegex = new RegExp('/admin/request/(\\S*)/action');
+                        const requestId = _requestActionRegex.exec(req.url)[1];
+                        if (userData.isAdmin) {
+                            getReqBody(req, (_data) => {
+                                const reqBody = JSON.parse(_data);
+                                if (reqBody.action) {
+                                    adminPublishRequestAction(requestId, reqBody.action, reqBody.message).then((gameId) => {
+                                        updateGame(gameId, {published_state: 'APPROVED'});
+                                        res.end('approved!');
+                                    }).catch(err => {
+                                        console.log('error performing publish action');
+                                        console.log(err);
+                                        res.end('error performing publish request action');
+                                    });
+                                } else {
+                                    res.end('request missing action');
+                                }
+                            });
+                        } else {
+                            console.log('user ' + userId + ' attempted to perform action on request');
+                            res.end('not an admin');
+                        }
+                    }).catch(err => {
+                        console.log('failed to get user data');
+                        console.log(err);
+                        res.end('could not get user data');
+                    });
+                }
+            }
+        },
+        'GET': {
+            [podcastRegex]: {
                 handle: () => {
-                    res.end('ok');
+                    const queryObject = url.parse(req.url, true).query;
+                    const { limit, offset, sort } = queryObject;
+                    getPodcastData(Number(offset || 0), Number(limit || 20), sort || 'desc').then(podcastData => {
+                        res.end(JSON.stringify(podcastData));
+                    });
+                }
+            },
+            [listGamesRegex]: {
+                handle: () => {
+                    const queryObject = url.parse(req.url, true).query;
+                    const { query, author, page, limit } = queryObject;
+                    if (author) {
+                        listGamesForAuthor({ author, page, limit }).then((data) => {
+                            res.writeHead(200, {
+                                'Content-Type': 'application/json'
+                            });
+                            res.end(JSON.stringify({
+                                games: data
+                            }));
+                        }).catch(err => {
+                            console.log('unable to list games for author');
+                            console.log(err);
+                            res.end('error');
+                        });
+                    } else if (query) {
+            console.log('query is ' + query);
+                        queryGames(query).then(data => {
+                            res.writeHead(200, {
+                                'Content-Type': 'application/json'
+                            });
+                            res.end(JSON.stringify({
+                                games: data
+                            })); 
+                        });
+                    } else {
+                        listGames().then(pages=> {
+                            res.writeHead(200, {
+                                'Content-Type': 'application/json'
+                            });
+                            res.end(JSON.stringify({
+                                games: pages[page || 1],
+                                pageCount: Object.keys(pages).length
+                            })); 
+                        });
+                    }
+                }
+            },
+            [gameDetailRegex]: {
+                handle: (gameId) => {
+                    getGameDetails(gameId).then(data => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+                        res.end(JSON.stringify(data)); 
+                    }).catch(err => {
+                        console.log(err);
+                        res.end('error');
+                    });
+                }
+            },
+            [gameVersionDetailRegex]: {
+                handle: (gameId, versionId) => {
+                    getGameDetails(gameId).then(data => {
+                        const foundVersion = data.versions.find(v => v.versionId === versionId);
+                        if (!foundVersion) {
+                            res.end('Version not found');
+                        } else {
+                            res.end(JSON.stringify(foundVersion));
+                        }
+                    }).catch((err) => {
+                        console.log('game detail fetch err');
+                        console.log(err);
+                        res.end('Game not found');
+                    });
+                }
+            },
+            [publishRequestEventsRegex]: {
+                requiresAuth: true,
+                handle: (userId, gameId) => {
+                    getPublishRequestEvents(gameId).then((publishRequests) => {
+                        res.end(JSON.stringify(publishRequests));
+                    });
+                }
+            },
+            [verifyPublishRequestRegex]: {
+                handle: () => {
+                    const queryObject = url.parse(req.url, true).query;
+                    const { code, requestId } = queryObject;
+                    verifyPublishRequest(code, requestId).then((publishRequest) => {
+                        publishGameVersion(publishRequest).then(() => {
+                emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
+                                updatePublishRequestState(publishRequest.game_id, publishRequest.source_info_hash, 'CONFIRMED').then(() => {
+                                    res.end('verified!');
+                    });
+                            });
+            });
+                    }).catch(err => {
+                        res.end(err);
+                    });
+                }
+            },
+            [assetsListRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    listAssets(userId).then(assets => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+
+                        res.end(JSON.stringify({
+                            assets
+                        }));
+                    }).catch((err) => {
+                        console.log(err);
+                        res.end('error');
+                    });
+                }
+            },
+            [publishRequestsRegex]: {
+                handle: (userId, gameId) => {
+                    listPublishRequests(gameId).then((publishRequests) => {
+                        res.end(JSON.stringify(publishRequests));
+                    });
+                },
+                requiresAuth: true  
+            },
+            [adminListPublishRequestsRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getCognitoUser(userId).then(userData => {
+                        if (userData.isAdmin) {
+                            adminListPublishRequests().then(publishRequests => {
+                                res.end(JSON.stringify(publishRequests));
+                            }).catch(err => {
+                                console.log('failed to list publish requests');
+                                console.error(err);
+                                res.end('failed to list requests');
+                            });
+                        } else {
+                            console.log('user attempted to call admin API: ' + userId);
+                            res.end('user is not an admin');
+                        }
+                    }).catch(err => {
+                        console.log(err);
+                        res.end('failed to get user data');
+                    });
+                }
+            },
+            [healthRegex]: {
+                handle: () => {
+                    res.end('ok!');
                 }
             }
         }
     };
-    
     if (req.method === 'OPTIONS') {
         res.end('ok');
     } else if (!requestHandlers[req.method]) {
@@ -1080,4 +1623,4 @@ const server = http.createServer((req, res) => {
 
 });
 
-server.listen(80);
+server.listen(8000);
