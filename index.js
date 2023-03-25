@@ -1025,6 +1025,8 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
+        console.log("REQUEST WITH METDHO " + req.method);   
+        console.log(req.url);
     const requestHandlers = {
         'POST': {
             [contactRegex]: {
@@ -1587,6 +1589,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(400);
         res.end('Unsupported method: ' + req.method);
     } else {
+
         // sort with largest values upfront to get the most specific match
         const matchers = Object.keys(requestHandlers[req.method]).sort((a, b) => b.length - a.length);
         let matched = null;
@@ -1623,4 +1626,4 @@ const server = http.createServer((req, res) => {
 
 });
 
-server.listen(8000);
+server.listen(80);
