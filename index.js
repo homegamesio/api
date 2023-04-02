@@ -6,28 +6,21 @@ const archiver = require('archiver');
 const fs = require('fs');
 const aws = require('aws-sdk');
 const querystring = require('querystring');
-const {
-    v4: uuidv4
-} = require('uuid');
 const crypto = require('crypto');
 const util = require('util');
-const {
-    parse
-} = require('querystring');
+const { parse } = require('querystring');
 const multiparty = require('multiparty');
-const {
-    fork
-} = require('child_process');
+const { fork } = require('child_process');
 const path = require('path');
-const {
-    verifyAccessToken
-} = require('homegames-common');
+const WebSocket = require('ws');
+const process = require('process');
+const { verifyAccessToken, getUserHash } = require('homegames-common');
+const redis = require('redis');
+const { v4: uuidv4 } = require('uuid');
 
 const SourceType = {
     GITHUB: 'GITHUB'
 };
-
-const process = require('process');
 
 const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
