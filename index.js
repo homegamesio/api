@@ -1,4 +1,5 @@
 const http = require('http');
+const acme = require('acme-client');
 const https = require('https');
 const unzipper = require('unzipper');
 const url = require('url');
@@ -26,6 +27,129 @@ const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
 };
 
+const AWS_ROUTE_53_HOSTED_ZONE_ID = process.env.AWS_ROUTE_53_HOSTED_ZONE_ID;
+
+const getDnsRecord = (name) => new Promise((resolve, reject) => {
+    const params = {
+        HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
+        StartRecordName: name,
+        StartRecordType: 'TXT'
+    };
+
+    const route53 = new aws.Route53();
+    route53.listResourceRecordSets(params, (err, data) => {
+        for (const i in data.ResourceRecordSets) {
+            const entry = data.ResourceRecordSets[i];
+            if (entry.Name === name + '.') {
+                resolve(entry.ResourceRecords[0].Value);
+            }
+        }
+        reject();
+    });
+
+});
+
+const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
+
+    getDnsRecord(name).then((value) => {
+        const deleteDnsParams = {
+            ChangeBatch: {
+                Changes: [
+                    {
+                        Action: 'DELETE',
+                        ResourceRecordSet: {
+                            Name: name,//dnsChallengeRecord.Name,
+                            Type: 'TXT',
+                            TTL: 300,
+                            ResourceRecords: [
+                                {
+                                    Value: value,//dnsChallengeRecord.Value
+                                }
+                            ]
+                            //                        TTL: 300,
+                            //                        Type: dnsChallengeRecord.Type
+                        }
+                    }
+                ]
+            },
+            HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID
+        };
+
+        const route53 = new aws.Route53();
+        route53.changeResourceRecordSets(deleteDnsParams, (err, data) => {
+            console.log('fkdkfskdfkdsf');
+            console.log(err);
+            console.log(data);
+            const deleteParams = {
+                Id: data.ChangeInfo.Id
+            };
+
+            route53.waitFor('resourceRecordSetsChanged', deleteParams, (err, data) => {
+                if (data.ChangeInfo.Status === 'INSYNC') {
+                    resolve();
+                }
+            });
+
+        });
+    });
+
+});
+
+const createDnsRecord = (name, value) => new Promise((resolve, reject) => {
+    const dnsParams = {
+        ChangeBatch: {
+            Changes: [
+                {
+                    Action: 'CREATE',
+                    ResourceRecordSet: {
+                        Name: name,
+                        ResourceRecords: [
+                            {
+                                Value: '"' + value + '"'
+                            }
+                        ],
+                        TTL: 300,
+                        Type: 'TXT'
+                    }
+                }
+            ]
+        },
+        HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID
+    };
+
+    const route53 = new aws.Route53();
+    route53.changeResourceRecordSets(dnsParams, (err, data) => {
+        if (err) {
+            reject(err);
+        } else {
+            const params = {
+                Id: data.ChangeInfo.Id
+            };
+
+            route53.waitFor('resourceRecordSetsChanged', params, (err, data) => {
+                if (data.ChangeInfo.Status === 'INSYNC') {
+                    resolve();
+                }
+            });
+        }
+    });
+
+});
+
+const challengeCreateFn = async(authz, challenge, keyAuthorization) => {
+    if (challenge.type === 'dns-01') {
+        console.log('creating!!');
+        await createDnsRecord(`_acme-challenge.${authz.identifier.value}`, keyAuthorization);
+    }
+};
+
+const challengeRemoveFn = async(authz, challenge, keyAuthorization) => {
+
+    if (challenge.type === 'dns-01') {
+        console.log('removing!!');
+        await deleteDnsRecord(`_acme-challenge.${authz.identifier.value}`);
+    }
+};
 
 // Redis key structure
 //{
@@ -49,11 +173,11 @@ const getHomegamesServers = (publicIp) => new Promise((resolve, reject) => {
                 resolve(data);
             }
         });
-        });
+    });
 });
 
 const deleteHostInfo = (publicIp, localIp) => new Promise((resolve, reject) => {
-        redisClient().then(client => {
+    redisClient().then(client => {
 
         client.hdel(publicIp, [localIp], (err, data) => {
             if (err) {
@@ -62,7 +186,7 @@ const deleteHostInfo = (publicIp, localIp) => new Promise((resolve, reject) => {
                 resolve();
             }
         });
-        });
+    });
 });
 
 const registerHost = (publicIp, info, hostId) => new Promise((resolve, reject) => {
@@ -78,7 +202,7 @@ const registerHost = (publicIp, info, hostId) => new Promise((resolve, reject) =
                     resolve();
                 }
             });
-        }
+        };
 
         // clear out existing entries
         client.hgetall(publicIp, (err, data) => {
@@ -108,7 +232,7 @@ const registerHost = (publicIp, info, hostId) => new Promise((resolve, reject) =
                 }
             }
         });
-        });
+    });
 });
 
 const generateSocketId = () => {
@@ -119,28 +243,28 @@ const updatePresence = (publicIp, serverId) => {
     console.log(`updating presence for server ${serverId}`);
     getHostInfo(publicIp, serverId).then(hostInfo => {
         if (!hostInfo) {
-                        console.warn(`no host info found for server ${serverId}`);
-                        reject();
+            console.warn(`no host info found for server ${serverId}`);
+            reject();
         }
         registerHost(publicIp, JSON.parse(hostInfo), serverId).then(() => {
-                    console.log(`updated presence for server ${serverId}`);
-                    resolve();
+            console.log(`updated presence for server ${serverId}`);
+            resolve();
         });
     });
 };
 
 const updateHostInfo = (publicIp, serverId, update) => new Promise((resolve, reject) => {
-        console.log(`updating host info for server ${serverId}`);
+    console.log(`updating host info for server ${serverId}`);
     getHostInfo(publicIp, serverId).then(hostInfo => {
         const newInfo = Object.assign(JSON.parse(hostInfo), update);
         registerHost(publicIp, newInfo, serverId).then(() => {
-                    console.log(`updated host info for server ${serverId}`);
-                    resolve();
+            console.log(`updated host info for server ${serverId}`);
+            resolve();
         }).catch(err => {
-                    console.error(`failed to update host info for server ${serverId}`);
-                    console.error(err);
-                    reject();
-                });
+            console.error(`failed to update host info for server ${serverId}`);
+            console.error(err);
+            reject();
+        });
     });
 });
 
@@ -159,7 +283,7 @@ const createDNSRecord = (url, ip) => new Promise((resolve, reject) => {
         ChangeBatch: {
             Changes: [
                 {
-                    Action: "CREATE", 
+                    Action: 'CREATE', 
                     ResourceRecordSet: {
                         Name: url,
                         ResourceRecords: [
@@ -168,7 +292,7 @@ const createDNSRecord = (url, ip) => new Promise((resolve, reject) => {
                             }
                         ], 
                         TTL: 60, 
-                        Type: "A"
+                        Type: 'A'
                     }
                 }
             ]
@@ -190,23 +314,23 @@ const verifyDNSRecord = (url, ip) => new Promise((resolve, reject) => {
         HostedZoneId: process.env.AWS_ROUTE_53_HOSTED_ZONE_ID,
         StartRecordName: url,
         StartRecordType: 'A',
-    MaxItems: '1'
+        MaxItems: '1'
     };
     
     route53.listResourceRecordSets(params, (err, data) => {
-            if (err) {
-                console.log("error");
-                console.error(err);
-                reject();
-            } else {
+        if (err) {
+            console.log('error');
+            console.error(err);
+            reject();
+        } else {
             if (data.ResourceRecordSets.length === 0 || data.ResourceRecordSets[0].Name !== url) {
-                    createDNSRecord(url, ip).then(() => {
+                createDNSRecord(url, ip).then(() => {
                     resolve();
-                    });
+                });
             } else {
                 resolve();
             }
-            }
+        }
     });
 });
 
@@ -218,10 +342,10 @@ const redisClient = () => new Promise((resolve, reject) => {
         host: process.env.REDIS_HOST,
         port: process.env.REDIS_PORT
     }).on('error', (err) => {
-            reject(err);
-        }).on('ready', () => {
-            resolve(client);
-        });
+        reject(err);
+    }).on('ready', () => {
+        resolve(client);
+    });
 });
 
 const redisGet = (key) => new Promise((resolve, reject) => {
@@ -233,7 +357,7 @@ const redisGet = (key) => new Promise((resolve, reject) => {
                 resolve(res);
             }
         });
-        });
+    });
 });
 
 const redisSet = (key, value) => new Promise((resolve, reject) => { 
@@ -245,7 +369,7 @@ const redisSet = (key, value) => new Promise((resolve, reject) => {
                 resolve(res);
             }
         });
-        });
+    });
 
 });
 
@@ -258,7 +382,7 @@ const redisHmset = (key, obj) => new Promise((resolve, reject) => {
                 resolve(res);
             }
         });
-        });
+    });
 });
 
 const getHostInfo = (publicIp, serverId) => new Promise((resolve, reject) => {
@@ -270,7 +394,7 @@ const getHostInfo = (publicIp, serverId) => new Promise((resolve, reject) => {
                 resolve(data[0]);
             }
         });
-        });
+    });
 
 });
 
@@ -971,7 +1095,7 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                 reject(err);
             } else {
                 resolve({
-            ...gameDetails,
+                    ...gameDetails,
                     versions: data.Items.map(mapGameVersion)
                 });
             }
@@ -1169,9 +1293,9 @@ const transformS3Response = (s3Content) => {
         }
 
         if (e.Key.endsWith('.mp3')) {
-            transformed[baseKey].audio = `https://podcast.homegames.io/${e.Key}`
+            transformed[baseKey].audio = `https://podcast.homegames.io/${e.Key}`;
         } else if (e.Key.endsWith('.mp4')) {
-            transformed[baseKey].video = `https://podcast.homegames.io/${e.Key}`
+            transformed[baseKey].video = `https://podcast.homegames.io/${e.Key}`;
         }
     });
 
@@ -1277,12 +1401,56 @@ const createGameRegex = '/games';
 const bugsRegex = '/bugs';
 const contactRegex = '/contact';
 
+const verifyDnsRegex = '/verifyDns';
+const certRequestRegex = '/cert';
+
+const requestCert = (userId) => new Promise((resolve, reject) => {
+    console.log('need to do the thing');
+    acme.crypto.createPrivateKey().then(key => {
+        const client = new acme.Client({
+            directoryUrl: acme.directory.letsencrypt.staging,//production,//.staging
+            accountKey: key
+        });
+
+        acme.crypto.createCsr({
+            commonName: 'picodeg.io'//,
+            //          altNames: ['picodeg.io']
+        }).then((certKey, certCsr) => {
+            console.log('did this');
+            console.log(certKey);
+            console.log(certCsr);
+            resolve();
+        }).catch(err => {
+            console.error('error creating csr');
+            console.error(err);
+            reject(err);
+        });
+    });
+});
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
     const requestHandlers = {
         'POST': {
+            [verifyDnsRegex]: {
+                handle: () => {
+                    res.end('fmmffm');
+                }
+            },
+            [certRequestRegex]: {
+                //               requiresAuth: true,
+                handle: (userId) => {
+                    requestCert(userId).then(() => {
+                        res.end('aite');
+                    }).catch(err => {
+                        console.error('Error ');
+                        console.error(err);
+                        res.end('error');
+                    });
+                }
+            },
             [bugsRegex]: {
                 handle: () => {
                     getReqBody(req, (_body, err) => {
@@ -1326,14 +1494,14 @@ const server = http.createServer((req, res) => {
                                     Data: 'New Homegames Support Form Message'
                                 }
                             },
-                            Source: "support-form@homegames.io"
+                            Source: 'support-form@homegames.io'
                         };
 
                         const ses = new aws.SES({region: 'us-west-2'});
 
                         ses.sendEmail(emailParams, (err, data) => {
                             res.end(JSON.stringify({
-                                success: !(!!err)
+                                success: !(err)
                             }));
                         });
                     });
@@ -1379,7 +1547,7 @@ const server = http.createServer((req, res) => {
                                                             S: fields.description[0] 
                                                         },
                                                         'thumbnail': {
-                                S: url.replace('https://assets.homegames.io/', '') 
+                                                            S: url.replace('https://assets.homegames.io/', '') 
                                                         }
                                                     }
                                                 }
@@ -1646,16 +1814,16 @@ const server = http.createServer((req, res) => {
                     getReqBody(req, (_data) => {
                         const data = JSON.parse(_data);
 
-            const { requestId } = data;
-            getPublishRequest(requestId).then(requestData => {
+                        const { requestId } = data;
+                        getPublishRequest(requestId).then(requestData => {
                             updatePublishRequestState(requestData.game_id, requestData.source_info_hash, 'PENDING_PUBLISH_APPROVAL').then(() => {
-                                        res.end('ok');
-                                }).catch(err => {
-                    res.end(err.toString());
-                });
+                                res.end('ok');
                             }).catch(err => {
                                 res.end(err.toString());
                             });
+                        }).catch(err => {
+                            res.end(err.toString());
+                        });
                     });
                 }
             },
@@ -1721,7 +1889,7 @@ const server = http.createServer((req, res) => {
                             res.end('error');
                         });
                     } else if (query) {
-            console.log('query is ' + query);
+                        console.log('query is ' + query);
                         queryGames(query).then(data => {
                             res.writeHead(200, {
                                 'Content-Type': 'application/json'
@@ -1759,7 +1927,7 @@ const server = http.createServer((req, res) => {
             [linkRegex]: {
                 handle: () => {
                     console.log('got a request to ' + req.url + ' (' +  req.method + ')');
-                        const { headers } = req;
+                    const { headers } = req;
 
                     const noServers = () => {
                         res.writeHead(200, {
@@ -1768,14 +1936,14 @@ const server = http.createServer((req, res) => {
                         res.end('No Homegames servers found. Contact support@homegames.io for help');
                     };
 
-                        if (!headers) {
-                            noServers();
-                        } else {
-                            res.writeHead(200, {
+                    if (!headers) {
+                        noServers();
+                    } else {
+                        res.writeHead(200, {
                             'Content-Type': 'text/plain'
                         });
 
-                            const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
+                        const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
 
                         getHomegamesServers(requesterIp).then(servers => {
                             const serverIds = servers && Object.keys(servers) || [];
@@ -1796,7 +1964,7 @@ const server = http.createServer((req, res) => {
                                     const prefix = serverInfo.https ? 'https': 'http';
                                     const urlOrIp = serverInfo.verifiedUrl || serverInfo.localIp;
                                     const lastHeartbeat = new Date(Number(serverInfo.timestamp));
-                                    return `<li><a href="${prefix}://${urlOrIp}"}>Server ID: ${serverId} (Last heartbeat: ${lastHeartbeat})</a></li>`
+                                    return `<li><a href="${prefix}://${urlOrIp}"}>Server ID: ${serverId} (Last heartbeat: ${lastHeartbeat})</a></li>`;
                                 });
 
                                 const content = `Homegames server selector: <ul>${serverOptions.join('')}</ul>`;
@@ -1810,11 +1978,11 @@ const server = http.createServer((req, res) => {
                                 noServers();
                             }
 
-                    }).catch(err => {
-                        console.log('Error getting host info');
-                        console.log(err);
-                        noServers();
-                    });
+                        }).catch(err => {
+                            console.log('Error getting host info');
+                            console.log(err);
+                            noServers();
+                        });
                     }
                     console.log('ayyyylm oa!');
                     res.end('ayy lmao');
@@ -1850,12 +2018,12 @@ const server = http.createServer((req, res) => {
                     const { code, requestId } = queryObject;
                     verifyPublishRequest(code, requestId).then((publishRequest) => {
                         publishGameVersion(publishRequest).then(() => {
-                emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
+                            emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
                                 updatePublishRequestState(publishRequest.game_id, publishRequest.source_info_hash, 'CONFIRMED').then(() => {
                                     res.end('verified!');
-                    });
+                                });
                             });
-            });
+                        });
                     }).catch(err => {
                         res.end(err);
                     });
@@ -1963,36 +2131,36 @@ const wss = new WebSocket.Server({ server });
 const clients = {};
 
 wss.on('connection', (ws, req) => {
-        const publicIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const publicIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
 
-        if (!publicIp) {
-            console.log(`No public IP found for websocket connection.`)
-            return;
-        }
+    if (!publicIp) {
+        console.log('No public IP found for websocket connection.');
+        return;
+    }
 
-        const socketId = generateSocketId();
+    const socketId = generateSocketId();
 
     ws.id = socketId;
 
     clients[ws.id] = ws;
 
-        console.log(`registering socket client with id: ${ws.id}`);
+    console.log(`registering socket client with id: ${ws.id}`);
 
     ws.on('message', (_message) => {
        
         try {
-                    const message = JSON.parse(_message);
+            const message = JSON.parse(_message);
 
             if (message.type === 'heartbeat') {
                 updatePresence(publicIp, ws.id).then(logSuccess('updatePresence')).catch(logFailure('updatePresence'));
             } else if (message.type === 'register') {
                 registerHost(publicIp, message.data, ws.id).then(logSuccess('registerHost')).catch(logFailure('registerHost'));
-                } else if (message.type === 'verify-dns') {
-                                console.log('verifying dns for user ' + message.username);
+            } else if (message.type === 'verify-dns') {
+                console.log('verifying dns for user ' + message.username);
                 verifyAccessToken(message.username, message.accessToken).then(() => {
-                        const ipSub = message.localIp.replace(/\./g, '-');
+                    const ipSub = message.localIp.replace(/\./g, '-');
                     const userHash = getUserHash(message.username);
-                        const userUrl = `${ipSub}.${userHash}.homegames.link`;
+                    const userUrl = `${ipSub}.${userHash}.homegames.link`;
                     verifyDNSRecord(userUrl, message.localIp).then(() => {
                         ws.send(JSON.stringify({
                             msgId: message.msgId,
@@ -2002,21 +2170,21 @@ wss.on('connection', (ws, req) => {
                         updateHostInfo(publicIp, ws.id, {verifiedUrl: userUrl}).then(logSuccess('upateHostInfo')).catch(logFailure('updateHostInfo'));
                     }).catch(logFailure('verifyDNSRecord'));
                 }).catch(err => {
-                                    console.log("Failed to verify access token for user " + message.username);
-                                    console.error(err);
-                                    ws.send(JSON.stringify({
-                                        msgId: message.msgId,
-                                        success: false,
-                                        error: 'Failed to verify access token'
-                                    }));
-                                    logFailure('verifyAccessToken');
-                                });
+                    console.log('Failed to verify access token for user ' + message.username);
+                    console.error(err);
+                    ws.send(JSON.stringify({
+                        msgId: message.msgId,
+                        success: false,
+                        error: 'Failed to verify access token'
+                    }));
+                    logFailure('verifyAccessToken');
+                });
             } else {
-                    console.log("received message without ip");
-                    console.log(message);
-                }
+                console.log('received message without ip');
+                console.log(message);
+            }
         } catch (err) {
-            console.log("Error processing client message");
+            console.log('Error processing client message');
             console.error(err);
         }
 
@@ -2028,7 +2196,7 @@ wss.on('connection', (ws, req) => {
         clients[ws.id] && delete clients[ws.id];
 
         deleteHostInfo(publicIp, ws.id).then(() => {
-                    console.log(`deregistered socket client with id: ${ws.id}`);
+            console.log(`deregistered socket client with id: ${ws.id}`);
         });
     });
 });

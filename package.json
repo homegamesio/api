@@ -16,6 +16,7 @@
   },
   "homepage": "https://github.com/homegamesio/homegames-api#readme",
   "dependencies": {
+    "acme-client": "^5.0.0",
     "archiver": "^5.3.0",
     "aws-sdk": "^2.868.0",
     "crypto": "^1.0.1",
