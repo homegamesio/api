@@ -77,9 +77,6 @@ const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
 
         const route53 = new aws.Route53();
         route53.changeResourceRecordSets(deleteDnsParams, (err, data) => {
-            console.log('fkdkfskdfkdsf');
-            console.log(err);
-            console.log(data);
             const deleteParams = {
                 Id: data.ChangeInfo.Id
             };
