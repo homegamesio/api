@@ -1112,7 +1112,8 @@ const mapGameVersion = (gameVersion) => {
         versionId: gameVersion.version_id,
         publishedAt: gameVersion.published_at,
         commitHash: gameVersion.commit_hash,
-        gameId: gameVersion.game_id
+        gameId: gameVersion.game_id,
+        isReviewed: gameVersion.is_reviewed
     };
 };
 
