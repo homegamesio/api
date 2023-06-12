@@ -1836,7 +1836,10 @@ const server = http.createServer((req, res) => {
                                 const reqBody = JSON.parse(_data);
                                 if (reqBody.action) {
                                     adminPublishRequestAction(requestId, reqBody.action, reqBody.message).then((gameId) => {
-                                        updateGame(gameId, {published_state: 'APPROVED'});
+
+                                        if (reqBody.action === 'approve') {
+                                            updateGame(gameId, {published_state: 'APPROVED'});
+                                        }
                                         res.end('approved!');
                                     }).catch(err => {
                                         console.log('error performing publish action');
