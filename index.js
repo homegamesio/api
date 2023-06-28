@@ -1388,6 +1388,7 @@ const verifyPublishRequestRegex = '/verify_publish_request';
 const listGamesRegex = '/games';
 const podcastRegex = '/podcast';
 const linkRegex = '/link';
+const ipRegex = '/ip';
 
 // terrible names
 const submitPublishRequestRegex = '/public_publish';
@@ -1402,7 +1403,7 @@ const contactRegex = '/contact';
 const verifyDnsRegex = '/verifyDns';
 const certRequestRegex = '/cert';
 
-const requestCert = (userId) => new Promise((resolve, reject) => {
+const requestCert = (publicIp) => new Promise((resolve, reject) => {
     console.log('need to do the thing');
     acme.crypto.createPrivateKey().then(key => {
         const client = new acme.Client({
@@ -1411,7 +1412,7 @@ const requestCert = (userId) => new Promise((resolve, reject) => {
         });
 
         acme.crypto.createCsr({
-            commonName: 'picodeg.io'//,
+            commonName: `${getHash(publicIp)}.homegames.link`//,
             //          altNames: ['picodeg.io']
         }).then((certKey, certCsr) => {
             console.log('did this');
@@ -1426,9 +1427,20 @@ const requestCert = (userId) => new Promise((resolve, reject) => {
     });
 });
 
+const getPublicIp = (req) => {
+    const connection = req && req.connection;
+    const socket = req && req.socket;
+
+    return req.ip || connection && connection.remoteAddress || socket && socket.remoteAddress || null;
+};
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
+
+    console.log('this is what i knoiw');
+
+    const requesterIp = getPublicIp(req);
 
     const requestHandlers = {
         'POST': {
@@ -1439,8 +1451,8 @@ const server = http.createServer((req, res) => {
             },
             [certRequestRegex]: {
                 //               requiresAuth: true,
-                handle: (userId) => {
-                    requestCert(userId).then(() => {
+                handle: () => {
+                    requestCert(requesterIp).then(() => {
                         res.end('aite');
                     }).catch(err => {
                         console.error('Error ');
@@ -1923,6 +1935,13 @@ const server = http.createServer((req, res) => {
                         console.log(err);
                         res.end('error');
                     });
+                }
+            },
+            [ipRegex]: {
+                handle: () => {
+                    const { headers } = req;
+                    const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    res.end(requesterIp);
                 }
             },
             [linkRegex]: {
