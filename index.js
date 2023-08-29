@@ -148,6 +148,34 @@ const challengeRemoveFn = async(authz, challenge, keyAuthorization) => {
     }
 };
 
+const storeRecord = (record) => {
+	if (record.length > 1000) {
+		console.log("Truncating record of length " + record.length);
+		record = record.substring(1000);
+	}
+
+	const errString = `[${Date.now()}] ${record.toString()}\n`;
+	const buf = Buffer.from(errString, 'utf-8');
+
+	const fileSize = buf.length;
+	const fileSizeMb = fileSize / (1024 * 1024);
+
+	if (fileSizeMb < 1) {
+            console.log('writing log file. size in mb: ' + fileSizeMb);
+
+	    const s3 = new aws.S3();
+	    const params = { Bucket: 'homegames', Key: 'error-logs/' + Date.now(), Body: buf };
+	    s3.upload(params, {}, (err, data) => {
+		console.log('s3 response');
+		console.log(err);
+		console.log(data);
+	    });
+       } else {
+            console.error("Ignoring bug report larger than 1mb");
+            console.error(record);
+       }
+}
+
 // Redis key structure
 //{
 //  "publicIp": {
@@ -1438,8 +1466,6 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    console.log('this is what i knoiw');
-
     const requesterIp = getPublicIp(req);
 
     const requestHandlers = {
@@ -1469,7 +1495,7 @@ const server = http.createServer((req, res) => {
                             res.end('error: ' + err);
                         } else {
                             console.log(`${Date.now()} Got bug report: `);
-                            console.log(_body);
+                            storeRecord(_body);
                             res.end('ok');
                         }
                     });
@@ -1520,6 +1546,7 @@ const server = http.createServer((req, res) => {
             [createGameRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
+                    console.log('got user id ' + userId);
                     const form = new multiparty.Form();
                     form.parse(req, (err, fields, files) => {
                         if (err) {
@@ -1580,6 +1607,10 @@ const server = http.createServer((req, res) => {
                                         }
                                     });
     
+                                }).catch(err => {
+                                    console.log('failed to upload thumbnail');
+                                    console.error(err);
+                                    res.end('error');
                                 });
                             }
                         }
@@ -2130,6 +2161,9 @@ const server = http.createServer((req, res) => {
                     } else {
                         verifyAccessToken(username, token).then(() => {
                             handlerInfo.handle(username, ...matchedParams);
+                        }).catch(err => {
+                            console.error(err);
+                            res.end('Unexpected error occured');
                         });
                     }
                 } else {
