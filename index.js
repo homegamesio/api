@@ -29,6 +29,28 @@ const poolData = {
 
 const AWS_ROUTE_53_HOSTED_ZONE_ID = process.env.AWS_ROUTE_53_HOSTED_ZONE_ID;
 
+const retryPublishRequest = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
+    const messageBody = JSON.stringify({ gameId, sourceInfoHash });
+    
+    const sqsParams = {
+        MessageBody: messageBody,
+        QueueUrl: process.env.SQS_QUEUE_URL,
+        MessageGroupId: Date.now() + '',
+        MessageDeduplicationId: Date.now() + ''
+    };
+
+    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
+        console.log(err);
+        console.log(sqsResponse);
+        if (err) {
+            reject(err);
+        } else {
+            resolve();
+        }
+    });
+ 
+});
+
 const getDnsRecord = (name) => new Promise((resolve, reject) => {
     const params = {
         HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
@@ -1016,7 +1038,7 @@ const getPublishRequestEvents = (requestId) => new Promise((resolve, reject) => 
 
 });
 
-const adminListPublishRequests = () => new Promise((resolve, reject) => {
+const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
     const client = new aws.DynamoDB.DocumentClient({
         region: 'us-west-2'
     });
@@ -1041,6 +1063,59 @@ const adminListPublishRequests = () => new Promise((resolve, reject) => {
     });
 
 });
+
+const adminListFailedPublishRequests = () => new Promise((resolve, reject) => {
+    const client = new aws.DynamoDB.DocumentClient({
+        region: 'us-west-2'
+    });
+
+    const params = {
+        TableName: 'publish_requests',
+        IndexName: 'status-index',
+        KeyConditionExpression: '#status = :status',
+        ExpressionAttributeNames: {
+            '#status': 'status'
+        },
+        ExpressionAttributeValues: {
+            ':status': 'FAILED' 
+        }
+    };
+
+    client.query(params, (err, data) => {
+        if (err) {
+            console.log(err);
+        }
+        resolve({requests: data.Items});
+    });
+});
+
+const adminListProcessingPublishRequests = () => new Promise((resolve, reject) => {
+    const client = new aws.DynamoDB.DocumentClient({
+        region: 'us-west-2'
+    });
+
+    const params = {
+        TableName: 'publish_requests',
+        IndexName: 'status-index',
+        KeyConditionExpression: '#status = :status',
+        ExpressionAttributeNames: {
+            '#status': 'status'
+        },
+        ExpressionAttributeValues: {
+            ':status': 'PROCESSING' 
+        }
+    };
+
+    client.query(params, (err, data) => {
+        if (err) {
+            console.log(err);
+        }
+        resolve({requests: data.Items});
+    });
+
+});
+
+
 
 const listPublishRequests = (gameId) => new Promise((resolve, reject) => {
     const client = new aws.DynamoDB.DocumentClient({
@@ -1410,7 +1485,9 @@ const publishRequestEventsRegex = '/publish_requests/(\\S*)/events';
 const gameDetailRegex = '/games/(\\S*)';
 const gameVersionDetailRegex = '/games/(\\S*)/version/(\\S*)';
 const healthRegex = '/health';
-const adminListPublishRequestsRegex = '/admin/publish_requests';
+const adminListPendingPublishRequestsRegex = '/admin/publish_requests';
+const adminListFailedPublishRequestsRegex = '/admin/publish_requests/failed';
+const adminRetryRequestRegex = '/admin/publish_requests/retry';
 const assetsListRegex = '/assets';
 const verifyPublishRequestRegex = '/verify_publish_request';
 const listGamesRegex = '/games';
@@ -1472,7 +1549,35 @@ const server = http.createServer((req, res) => {
         'POST': {
             [verifyDnsRegex]: {
                 handle: () => {
-                    res.end('fmmffm');
+                    res.end('ok');
+                }
+            },
+            [adminRetryRequestRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getCognitoUser(userId).then(userData => {
+                        if (userData.isAdmin) {
+                            getReqBody(req, (_body, err) => {
+                                if (err) {
+                                    res.end('error ' + err);
+                                } else {
+                                    const body = JSON.parse(_body);
+                                    if (!body.gameId || !body.sourceInfoHash) {
+                                        res.end('requires gameId and sourceInfoHash');
+                                    } else {
+                                        retryPublishRequest(body.gameId, body.sourceInfoHash);
+                                        res.end('ok');
+                                    }
+                                }
+                            });
+                        } else {
+                            console.log('user attempted to call admin API: ' + userId);
+                            res.end('user is not an admin');
+                        }
+                    }).catch(err => {
+                        console.log(err);
+                        res.end('failed to get user data');
+                    });
                 }
             },
             [certRequestRegex]: {
@@ -2105,12 +2210,34 @@ const server = http.createServer((req, res) => {
                 },
                 requiresAuth: true  
             },
-            [adminListPublishRequestsRegex]: {
+            [adminListPendingPublishRequestsRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
                     getCognitoUser(userId).then(userData => {
                         if (userData.isAdmin) {
-                            adminListPublishRequests().then(publishRequests => {
+                            adminListPendingPublishRequests().then(publishRequests => {
+                                res.end(JSON.stringify(publishRequests));
+                            }).catch(err => {
+                                console.log('failed to list publish requests');
+                                console.error(err);
+                                res.end('failed to list requests');
+                            });
+                        } else {
+                            console.log('user attempted to call admin API: ' + userId);
+                            res.end('user is not an admin');
+                        }
+                    }).catch(err => {
+                        console.log(err);
+                        res.end('failed to get user data');
+                    });
+                }
+            },
+            [adminListFailedPublishRequestsRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getCognitoUser(userId).then(userData => {
+                        if (userData.isAdmin) {
+                            adminListFailedPublishRequests().then(publishRequests => {
                                 res.end(JSON.stringify(publishRequests));
                             }).catch(err => {
                                 console.log('failed to list publish requests');
