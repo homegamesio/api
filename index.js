@@ -39,6 +39,8 @@ const retryPublishRequest = (gameId, sourceInfoHash) => new Promise((resolve, re
         MessageDeduplicationId: Date.now() + ''
     };
 
+    const sqs = new aws.SQS({region: 'us-west-2'});
+    
     sqs.sendMessage(sqsParams, (err, sqsResponse) => {
         console.log(err);
         console.log(sqsResponse);
@@ -484,6 +486,162 @@ const uploadThumbnail = (username, gameId, thumbnail) => new Promise((resolve, r
     resolve('https://assets.homegames.io/' + assetId);
 });
 
+const getProfileInfo = (userId) => new Promise((resolve, reject) => {
+    const ddb = new aws.DynamoDB({
+        region: 'us-west-2'
+    });
+
+    const params = {
+        TableName: 'developer',
+        Key: {
+            'developer_id': {
+                S: userId 
+            }
+        }
+    };
+
+    listGamesForAuthor({ author: userId }).then((games) => {
+        ddb.getItem(params, (err, data) => {
+            if (err) {
+                console.log(err);
+                reject();
+            } else {
+                if (data.Item) {
+                    resolve({
+                        description: data.Item.description?.S,
+                        image: data.Item.image?.S,
+                        qrValue: data.Item.qr_value?.S,
+                        qrMeta: data.Item.qr_meta?.S,
+                        games
+                    });
+                } else {
+                    resolve({
+                        games
+                    });
+                }
+            }
+        });
+    });
+});
+
+const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((resolve, reject) => {
+    const messageBody = JSON.stringify({ userId, assetId, type: 'gameImage', gameId });
+    
+    const sqsParams = {
+        MessageBody: messageBody,
+        QueueUrl: process.env.SQS_IMAGE_QUEUE_URL,
+        MessageGroupId: Date.now() + '',
+        MessageDeduplicationId: Date.now() + ''
+    };
+
+    console.log('params!');
+    console.log(sqsParams);
+    
+    const sqs = new aws.SQS({region: 'us-west-2'});
+    
+    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
+        console.log(err);
+        console.log(sqsResponse);
+        resolve();
+    });
+ 
+});
+
+const createUserImagePublishRequest = (userId, assetId) => new Promise((resolve, reject) => {
+    const messageBody = JSON.stringify({ userId, assetId, type: 'userImage' });
+    
+    const sqsParams = {
+        MessageBody: messageBody,
+        QueueUrl: process.env.SQS_IMAGE_QUEUE_URL,
+        MessageGroupId: Date.now() + '',
+        MessageDeduplicationId: Date.now() + ''
+    };
+
+    console.log('params!');
+    console.log(sqsParams);
+    
+    const sqs = new aws.SQS({region: 'us-west-2'});
+    
+    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
+        console.log(err);
+        console.log(sqsResponse);
+        resolve();
+    });
+ 
+});
+
+const updateProfileInfo = (userId, { description, qrValue, qrMeta, image }) => new Promise((resolve, reject) => {    
+    const ddb = new aws.DynamoDB({
+        region: 'us-west-2'
+    });
+
+    const attributes = {};
+
+    if (description && description.length <= 200) {
+        attributes['description'] = {
+            Action: 'PUT',
+            Value: {
+                S: description
+            }
+        }
+    }
+
+    if (qrValue && qrValue.length <= 200) {
+        attributes['qr_value'] = {
+            Action: 'PUT',
+            Value: {
+                S: qrValue
+            }
+        }
+    }
+
+    if (qrMeta && qrMeta.length <= 200) {
+        attributes['qr_meta'] = {
+            Action: 'PUT',
+            Value: {
+                S: qrMeta
+            }
+        }
+    }
+
+    if (image) {
+        createUserImagePublishRequest(userId, image);
+//        attributes['image'] = {
+//            Action: 'PUT',
+//            Value: {
+//                S: image 
+//            }
+//        }
+    }
+
+    if (Object.keys(attributes).length < 1) {
+//        reject('Nothing to update');
+        resolve();
+    } else {
+        console.log('updating user ' + userId);
+        console.log('with these attributes');
+        console.log(attributes);
+        const updateParams = {
+            TableName: 'developer',
+            Key: {
+                'developer_id': {
+                    S: userId
+                }
+            },
+            AttributeUpdates: attributes
+        };
+
+        ddb.updateItem(updateParams, (err, putResult) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve();
+            }
+        });
+    }
+
+});
+
 const getLatestGameVersion = (gameId) => new Promise((resolve, reject) => {
     const readClient = new aws.DynamoDB.DocumentClient({
         region: 'us-west-2'
@@ -586,60 +744,6 @@ const publishGameVersion = (publishRequest) => new Promise((resolve, reject) => 
                 });
             });
         }
-    });
-});
-
-const requestIdFromCode = (code) => new Promise((resolve, reject) => {
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    const codeParams = {
-        TableName: 'verification_requests',
-        IndexName: 'code-index',
-        Key: {
-            'code': {
-                S: code
-            }
-        }
-    };
-
-    ddb.getItem(codeParams, (err, data) => {
-        if (err) {
-            console.log(err);
-            reject();
-        } else {
-            const requestId = data.Item.publish_request_id.S;
-            resolve(request);
-        }
-    });
-
-});
-
-const getPublishRequestFromCode = (code) => new Promise((resolve, reject) => {
-    requestIdFromCode(code).then(requestId => {
-        const ddb = new aws.DynamoDB({
-            region: 'us-west-2'
-        });
-
-        const params = {
-            TableName: 'publish_requests',
-            IndexName: 'request_id-index',
-            Key: {
-                'request_id': {
-                    S: requestId
-                }
-            }
-        };
-
-        ddb.getItem(params, (err, data) => {
-            if (err) {
-                console.log(err);
-                reject();
-            } else {
-                resolve();
-            }
-        });
     });
 });
 
@@ -786,6 +890,8 @@ const verifyPublishRequest = (code, requestId) => new Promise((resolve, reject) 
     emitEvent(requestId, 'VERIFICATION_ATTEMPT', 'Attempting to verify publish request from email code').then(() => {
         verifyCode(code, requestId).then(() => {
             getPublishRequest(requestId).then(requestData => {
+                console.log('got this rrequest data');
+                console.log(requestData);
                 const { game_id, source_info_hash } = requestData;
                 if (requestData.status == 'CONFIRMED') {
                     reject('already confirmed');
@@ -870,8 +976,6 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
         console.log(updateParams);
         resolve();
     } else {
-
-
         const ddb = new aws.DynamoDB({
             region: 'us-west-2'
         });
@@ -1161,6 +1265,8 @@ const listGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, re
     };
 
     client.query(params, (err, data) => {
+        console.log("DIDIADIADI");
+        console.log(data);
         if (err) {
             reject([{error: err}]);
         } else {
@@ -1315,6 +1421,102 @@ const listGames = (limit = 10, offset = 0, sort = DEFAULT_GAME_ORDER, query = nu
     }
 });
 
+const getGameVersion = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
+//    const ddb = new aws.DynamoDB({
+//        region: 'us-west-2'
+//    });
+//
+//    const params = {
+//        TableName: 'game_versions',
+//        IndexName: 'request_id_index',
+//        Key: {
+//            'request_id': {
+//                S: `${gameId}:${sourceInfoHash}`
+//            }
+//        }
+//    };
+//
+//    ddb.getItem(params, (err, data) => {
+//        if (err) {
+//            console.log(err);
+//            reject();
+//        } else {
+//            resolve(data.Item);
+//        }
+//    });
+
+    const readClient = new aws.DynamoDB.DocumentClient({
+        region: 'us-west-2'
+    });
+
+    const params = {
+        TableName: 'game_versions',
+        IndexName: 'request_id_index',
+        Limit: 1,
+        KeyConditionExpression: '#request_id = :request_id',
+        ExpressionAttributeNames: {
+            '#request_id': 'request_id',
+        },
+        ExpressionAttributeValues: {
+            ':request_id': `${gameId}:${sourceInfoHash}`
+        }
+    };
+
+    readClient.query(params, (err, results) => {
+        if (err) {
+            console.log(err);
+            reject(err.toString());
+        } else {
+            if (results.Items.length) {
+                resolve(results.Items[0]);
+                //resolve(Number(results.Items[0].version));
+            } else {
+                resolve(null);
+
+            }
+        }
+    });
+ 
+
+});
+
+const setGameReviewed = (gameId, version) => new Promise((resolve, reject) => {
+    const ddb = new aws.DynamoDB({
+        region: 'us-west-2'
+    });
+
+    const updateParams = {
+        TableName: 'game_versions',
+        Key: {
+            'game_id': {
+                S: gameId
+            },
+            'version': {
+                N: version + ''
+            }
+        },
+        AttributeUpdates: {
+            'is_reviewed': {
+                Action: 'PUT',
+                Value: {
+                    BOOL: true
+                }
+            }
+        }
+    };
+
+    ddb.updateItem(updateParams, (err, putResult) => {
+        console.log(err);
+        if (err) {
+            reject();
+        } else {
+            resolve();
+        }
+    });
+});
+
+
+
 const adminPublishRequestAction = (requestId, action, message) => new Promise((resolve, reject) => {
     const ddb = new aws.DynamoDB({
         region: 'us-west-2'
@@ -1338,39 +1540,46 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
         const sourceInfoHash = requestData.source_info_hash;
         const gameId = requestData.game_id;
 
-        const updateParams = {
-            TableName: 'publish_requests',
-            Key: {
-                'game_id': {
-                    S: gameId
-                },
-                'source_info_hash': {
-                    S: sourceInfoHash
-                }
-            },
-            AttributeUpdates: {
-                'status': {
-                    Action: 'PUT',
-                    Value: {
-                        S: newStatus
-                    }
-                },
-                'adminMessage': {
-                    Action: 'PUT',
-                    Value: {
-                        S: message
-                    }
-                }
+        getGameVersion(gameId, sourceInfoHash).then((gameVersion) => {
+            console.log('this is game version');
+            console.log(gameVersion);
+            if (gameVersion && newStatus === 'PUBLISHED') {
+                setGameReviewed(gameId, gameVersion.version);
             }
-        };
+            const updateParams = {
+                TableName: 'publish_requests',
+                Key: {
+                    'game_id': {
+                        S: gameId
+                    },
+                    'source_info_hash': {
+                        S: sourceInfoHash
+                    }
+                },
+                AttributeUpdates: {
+                    'status': {
+                        Action: 'PUT',
+                        Value: {
+                            S: newStatus
+                        }
+                    },
+                    'adminMessage': {
+                        Action: 'PUT',
+                        Value: {
+                            S: message
+                        }
+                    }
+                }
+            };
 
-        ddb.updateItem(updateParams, (err, putResult) => {
-            if (err) {
-                console.log(err);
-                reject();
-            } else {
-                resolve(gameId);
-            }
+            ddb.updateItem(updateParams, (err, putResult) => {
+                if (err) {
+                    console.log(err);
+                    reject();
+                } else {
+                    resolve(gameId);
+                }
+            });
         });
     });
 
@@ -1481,6 +1690,8 @@ const getPodcastData = (offset = 0, limit = 20, sort = 'desc') => new Promise((r
 });
 
 const publishRequestsRegex = '/games/(\\S*)/publish_requests';
+const profileRegex = '/profile';
+const devProfileRegex = '/profile/(\\S*)';
 const publishRequestEventsRegex = '/publish_requests/(\\S*)/events';
 const gameDetailRegex = '/games/(\\S*)';
 const gameVersionDetailRegex = '/games/(\\S*)/version/(\\S*)';
@@ -1547,6 +1758,17 @@ const server = http.createServer((req, res) => {
 
     const requestHandlers = {
         'POST': {
+            [profileRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getReqBody(req, (_body, err) => {
+                        const body = JSON.parse(_body);
+                        console.log('update body');
+                        console.log(body);
+                        updateProfileInfo(userId, body).then(() => res.end(''));
+                    });
+                }
+            },
             [verifyDnsRegex]: {
                 handle: () => {
                     res.end('ok');
@@ -1659,64 +1881,70 @@ const server = http.createServer((req, res) => {
                             console.error(err);
                             res.end('error');
                         } else {
-                            if (!files.thumbnail || !files.thumbnail.length || !fields.name || !fields.name.length || !fields.description || !fields.description.length) {
-                                res.end('creation requires name, thumbnail & description');
+                            if (!fields.name || !fields.name.length || !fields.description || !fields.description.length) {
+                                res.end('creation requires name & description');
                             } else {
                                 const gameId = generateId();
-                                uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
-                                    const nowString = '' + Date.now();
-                                    const params = {
-                                        RequestItems: {
-                                            [process.env.GAME_TABLE]: [{
-                                                PutRequest: {
-                                                    Item: {
-                                                        'game_id': {
-                                                            S: gameId
-                                                        },
-                                                        'created_by': {
-                                                            S: userId 
-                                                        },
-                                                        'name': {
-                                                            S: fields.name[0]
-                                                        },
-                                                        'created_on': {
-                                                            N: nowString
-                                                        },
-                                                        'updated': {
-                                                            N: nowString
-                                                        },
-                                                        'description': {
-                                                            S: fields.description[0] 
-                                                        },
-                                                        'thumbnail': {
-                                                            S: url.replace('https://assets.homegames.io/', '') 
-                                                        }
-                                                    }
+                                const nowString = '' + Date.now();
+                                const params = {
+                                    RequestItems: {
+                                        [process.env.GAME_TABLE]: [{
+                                            PutRequest: {
+                                                Item: {
+                                                    'game_id': {
+                                                        S: gameId
+                                                    },
+                                                    'created_by': {
+                                                        S: userId 
+                                                    },
+                                                    'name': {
+                                                        S: fields.name[0]
+                                                    },
+                                                    'created_on': {
+                                                        N: nowString
+                                                    },
+                                                    'updated': {
+                                                        N: nowString
+                                                    },
+                                                    'description': {
+                                                        S: fields.description[0] 
+                                                    },
+                                                    //'thumbnail': {
+                                                    //    S: url.replace('https://assets.homegames.io/', '') 
+                                                    //}
                                                 }
-                                            }]
-                                        }
-                                    };
+                                            }
+                                        }]
+                                    }
+                                };
         
-                                    const client = new aws.DynamoDB({
-                                        region: 'us-west-2'
-                                    });
-                                    client.batchWriteItem(params, (err, putResult) => {
-                                        if (!err) {
-                                            res.writeHead(200, {
-                                                'Content-Type': 'application/json'
-                                            });
-                                            res.end(JSON.stringify(mapGame(params.RequestItems[process.env.GAME_TABLE][0].PutRequest.Item)));
-                                        } else {
-                                            console.log(err);
-                                            res.end('error');
-                                        }
-                                    });
-    
-                                }).catch(err => {
-                                    console.log('failed to upload thumbnail');
-                                    console.error(err);
-                                    res.end('error');
+                                const client = new aws.DynamoDB({
+                                    region: 'us-west-2'
                                 });
+                                client.batchWriteItem(params, (err, putResult) => {
+                                    if (!err) {
+                                        res.writeHead(200, {
+                                            'Content-Type': 'application/json'
+                                        });
+                                        res.end(JSON.stringify(mapGame(params.RequestItems[process.env.GAME_TABLE][0].PutRequest.Item)));
+                                    } else {
+                                        console.log(err);
+                                        res.end('error');
+                                    }
+                                });
+
+                                if (files.thumbnail?.length) {
+                                    console.log('need to do something with thumbnail');
+
+                                    createGameImagePublishRequest(userId, image, gameId);
+    
+                                    //uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
+                                    //}).catch(err => {
+                                    //    console.log('failed to upload thumbnail');
+                                    //    console.error(err);
+                                    //});
+
+                                }
                             }
                         }
                     });
@@ -1786,14 +2014,20 @@ const server = http.createServer((req, res) => {
                         const data = JSON.parse(_data);
                         const _gamePublishRegex = new RegExp('/games/(\\S*)/publish');
                         const gameId = _gamePublishRegex.exec(req.url)[1];
+                        console.log("here is data");
+                        console.log(data);
     
                         const publishData = {
                             commit: data.commit,
                             requester: userId,
                             owner: data.owner,
                             repo: data.repo,
+                            //squishVersion: data.squishVersion,
                             gameId
                         };
+
+                        console.log('publish data');
+                        console.log(publishData);
     
                         const buildSourceInfoHash = ({sourceType, commit, owner, repo}) => {
                             const stringConcat = `${sourceType}${commit}${owner}${repo}`;
@@ -1826,7 +2060,7 @@ const server = http.createServer((req, res) => {
                             });
                         });
     
-                        const createPublishRequest = ({commit, owner, repo, gameId, requester}) => new Promise((resolve, reject) => {
+                        const createPublishRequest = ({commit, owner, repo, gameId, requester }) => new Promise((resolve, reject) => {
                 
                             const sourceInfoHash = buildSourceInfoHash({sourceType: SourceType.GITHUB, commit, owner, repo});
     
@@ -1865,14 +2099,22 @@ const server = http.createServer((req, res) => {
                                     },
                                     'status': {
                                         S: 'SUBMITTED'
-                                    }
+                                    },
+//                                    'squishVersion': {
+//                                        S: squishVersion
+//                                    }
                                 }
                             };
+
+                            console.log("HERE IS PAREAMS!");
+                            console.log(params);
                 
                             client.putItem(params, (err, putResult) => {
                                 if (!err) {
                                     resolve({sourceInfoHash, gameId});
                                 } else {
+                                    console.error('error creating publish request');
+                                    console.error(err);
                                     reject(err);
                                 }
                             });
@@ -1915,7 +2157,8 @@ const server = http.createServer((req, res) => {
                 handle: (userId, gameId) => {
                     getReqBody(req, (_data) => {
                         const data = JSON.parse(_data);
-    
+                        console.log('thjis is data');
+ 
                         const changed = data.description || data.thumbnail;
     
                         if (changed) {
@@ -1928,8 +2171,11 @@ const server = http.createServer((req, res) => {
                                     });
                                     res.end('You cannot modify a game that you didnt create');
                                 } else {
+                                    console.log("FDDSFSDF");
                                     if (data.description != game.description) {
+                                        console.log("FSDFSDFDSFDSFDSFDSF");
                                         updateGame(gameId, {description: data.description}).then((_game) => {
+                                            console.log('dsfjksdfhjkdsf');
                                             // sigh. 
                                             setTimeout(() => {
                                                 res.writeHead(200, {
@@ -1941,6 +2187,10 @@ const server = http.createServer((req, res) => {
                                     } else {
                                         res.end('hmmm');
                                     }
+                                }
+
+                                if (data.thumbnail !== game.thumbnail) {
+                                    createGameImagePublishRequest(userId, data.thumbnail, gameId);
                                 }
                             }).catch(err => {
                                 res.end(err.toString());
@@ -2172,6 +2422,7 @@ const server = http.createServer((req, res) => {
                 handle: () => {
                     const queryObject = url.parse(req.url, true).query;
                     const { code, requestId } = queryObject;
+                
                     verifyPublishRequest(code, requestId).then((publishRequest) => {
                         publishGameVersion(publishRequest).then(() => {
                             emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
@@ -2201,6 +2452,17 @@ const server = http.createServer((req, res) => {
                         res.end('error');
                     });
                 }
+            },
+            [devProfileRegex]: {
+                handle: (devId) => {
+                    getProfileInfo(devId).then(data => res.end(JSON.stringify(data)));
+                }
+            },
+            [profileRegex]: {
+                handle: (userId) => {
+                    getProfileInfo(userId).then(data => res.end(JSON.stringify(data)));
+                },
+                requiresAuth: true
             },
             [publishRequestsRegex]: {
                 handle: (userId, gameId) => {
@@ -2382,4 +2644,4 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-server.listen(80);
+server.listen(8080);
