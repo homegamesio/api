@@ -29,6 +29,103 @@ const poolData = {
 
 const AWS_ROUTE_53_HOSTED_ZONE_ID = process.env.AWS_ROUTE_53_HOSTED_ZONE_ID;
 
+const getLatestContentRequestForIp = (ip) => new Promise((resolve, reject) => {
+    const client = new aws.DynamoDB.DocumentClient({
+        region: 'us-west-2'
+    });
+
+    const params = {
+        TableName: 'content-requests',
+        IndexName: 'ip_address_index',
+        Limit: 1,
+        ScanIndexForward: false,
+        KeyConditionExpression: '#ip_address = :ip_address',
+        ExpressionAttributeNames: {
+            '#ip_address': 'ip_address'
+        },
+        ExpressionAttributeValues: {
+            ':ip_address': ip
+        }
+    };
+
+    client.query(params, (err, data) => {
+        if (data?.Items?.length) {
+            resolve(data.Items[0]);
+        } else {
+            resolve(null);
+        }
+//        if (err) {
+//            reject([{error: err}]);
+//        } else {
+//            resolve(data.Items.map(mapGame));
+//        }
+    });
+
+});
+
+const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
+    getLatestContentRequestForIp(ip).then((last) => {
+        if (!last || last.created_at + (30 * 1000) < Date.now()) {
+            if (!request.type) {
+                reject('i aint got no type');
+            } else {
+                const requestId = uuidv4();
+ 
+                const ddbClient = new aws.DynamoDB({
+                    region: 'us-west-2'
+                });
+
+                const now = Date.now();
+
+                const messageBody = JSON.stringify({ requestId, createdAt: now, type: request.type, keywords: request.keywords || [] });
+
+                const params = {
+                    TableName: 'content-requests',
+                    Item: {
+                        'request_id': {
+                            S: requestId
+                        },
+                        'created_at': {
+                            N: `${now}`
+                        },
+                        'ip_address': {
+                            S: '' + ip
+                        }
+                    }
+                };
+
+                ddbClient.putItem(params, (err, putResult) => {
+                    console.log(err);
+                    console.log(putResult);
+            
+                    const sqsParams = {
+                        MessageBody: messageBody,
+                        QueueUrl: process.env.CONTENT_QUEUE_URL,
+                        MessageGroupId: Date.now() + '',
+                        MessageDeduplicationId: Date.now() + ''
+                    };
+
+                    const sqs = new aws.SQS({region: 'us-west-2'});
+                    
+                    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
+                        console.log(err);
+                        console.log(sqsResponse);
+                        if (err) {
+                            reject(err);
+                        } else {
+                            resolve(requestId);
+                        }
+                    });
+
+                }); 
+            }
+        } else {
+            console.log("FSDHFKJSDFJKDSF");
+            reject('Too many requests for IP');
+        }
+    });
+});
+
 const retryPublishRequest = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
     const messageBody = JSON.stringify({ gameId, sourceInfoHash });
     
@@ -1705,6 +1802,8 @@ const listGamesRegex = '/games';
 const podcastRegex = '/podcast';
 const linkRegex = '/link';
 const ipRegex = '/ip';
+const servicesRegex = '/services';
+const serviceRequestsRegex = '/service_requests/(\\S*)';
 
 // terrible names
 const submitPublishRequestRegex = '/public_publish';
@@ -2204,6 +2303,21 @@ const server = http.createServer((req, res) => {
                     });
                 }
             },
+            [servicesRegex]: {
+                handle: () => {
+                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    console.log('requester ip ' + requesterIp);
+                    getReqBody(req, (_data) => {
+                        const data = JSON.parse(_data);
+                        submitContentRequest(data, requesterIp).then(requestId => {
+                            res.end(JSON.stringify({requestId}));
+                        }).catch(err => {
+                            res.writeHead(400);
+                            res.end(err);
+                        });
+                    });
+                }
+            },
             [submitPublishRequestRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
@@ -2268,6 +2382,49 @@ const server = http.createServer((req, res) => {
                     getPodcastData(Number(offset || 0), Number(limit || 20), sort || 'desc').then(podcastData => {
                         res.end(JSON.stringify(podcastData));
                     });
+                }
+            },
+            [serviceRequestsRegex]: {
+                handle: (requestId) => {
+                    const readClient = new aws.DynamoDB.DocumentClient({
+                        region: 'us-west-2'
+                    });
+
+                    const params = {
+                        TableName: 'content-requests',
+                        ScanIndexForward: false,
+                        Limit: 1,
+                        KeyConditionExpression: '#request_id = :request_id',
+                        ExpressionAttributeNames: {
+                            '#request_id': 'request_id',
+                        },
+                        ExpressionAttributeValues: {
+                            ':request_id': requestId
+                        }
+                    };
+
+                    readClient.query(params, (err, results) => {
+                        if (err) {
+                            console.log(err);
+                            res.end(err.toString());
+                        } else {
+                            if (results.Items.length) {
+                                console.log("SDHJKFHSDFJK!");
+                                console.log(results.Items[0]);
+                                const response = {
+                                    response: results.Items[0].response ? JSON.parse(results.Items[0].response) : null,
+                                    createdAt: results.Items[0].created_at,
+                                    requestId
+                                };
+                                console.log('dsfhdsfdsf');
+                                console.log(response);
+                                res.end(JSON.stringify(response));
+                            } else {
+                                res.end("{}");
+                            }
+                        }
+                    });
+ 
                 }
             },
             [listGamesRegex]: {
