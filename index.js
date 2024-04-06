@@ -77,8 +77,9 @@ const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
 
                 const now = Date.now();
 
-                const messageBody = JSON.stringify({ requestId, createdAt: now, type: request.type, keywords: request.keywords || [] });
+                const messageBody = JSON.stringify({ requestId, createdAt: now, type: request.type, model: request.model, prompt: request.prompt });
 
+// todo: i dont like storing these. maybe store in redis with short (< 1 hour) ttl
                 const params = {
                     TableName: 'content-requests',
                     Item: {
@@ -2307,14 +2308,70 @@ const server = http.createServer((req, res) => {
                 handle: () => {
                     const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
                     console.log('requester ip ' + requesterIp);
+                    
+                    const supportedModels = {
+                        'mistral-7b-instruct-v0.2': {
+                            // not sure what to put here (if anything) yet. maybe model-specific config / safeguards
+                        }
+                    };
+                    const supportedServices = {
+                        'content-generation': {
+                            validator: (data) => {
+                                if (!data.model) {
+                                    return 'missing model';
+                                }
+
+                                if (!supportedModels[data.model]) {
+                                    return 'unknown model';
+                                }
+
+                                if (!data['prompt']) {
+                                    return 'missing prompt';
+                                }
+
+                                if (!data['prompt'].length > 100) {
+                                    return 'prompt too long (> 100 characters)';
+                                }
+
+                                return null;
+                            }
+                        }
+                    };
+
+                    const validateServiceRequest = (data) => {
+                        if (!data.type) {
+                            return 'request missing type';
+                        }
+
+                        if (!supportedServices[data.type]) {
+                            return 'unknown service type';
+                        }
+
+                        if (supportedServices[data.type].validator) {
+                            const serviceValidationErr = supportedServices[data.type].validator(data);
+                            if (serviceValidationErr) {
+                                return serviceValidationErr;
+                            }
+                        }
+
+                        return null;
+                    };
+
                     getReqBody(req, (_data) => {
                         const data = JSON.parse(_data);
-                        submitContentRequest(data, requesterIp).then(requestId => {
-                            res.end(JSON.stringify({requestId}));
-                        }).catch(err => {
+                        const validationErr = validateServiceRequest(data);
+                        if (validationErr) {
                             res.writeHead(400);
-                            res.end(err);
-                        });
+                            res.end(JSON.stringify({ error: validationErr } )); 
+                        } else {
+                            submitContentRequest(data, requesterIp).then(requestId => {
+                                res.end(JSON.stringify({requestId}));
+                            }).catch(err => {
+                                console.error(err);
+                                res.writeHead(400);
+                                res.end(JSON.stringify(err));
+                            });
+                        }
                     });
                 }
             },
@@ -2409,15 +2466,11 @@ const server = http.createServer((req, res) => {
                             res.end(err.toString());
                         } else {
                             if (results.Items.length) {
-                                console.log("SDHJKFHSDFJK!");
-                                console.log(results.Items[0]);
                                 const response = {
                                     response: results.Items[0].response ? JSON.parse(results.Items[0].response) : null,
                                     createdAt: results.Items[0].created_at,
                                     requestId
                                 };
-                                console.log('dsfhdsfdsf');
-                                console.log(response);
                                 res.end(JSON.stringify(response));
                             } else {
                                 res.end("{}");
@@ -2445,7 +2498,6 @@ const server = http.createServer((req, res) => {
                             res.end('error');
                         });
                     } else if (query) {
-                        console.log('query is ' + query);
                         queryGames(query).then(data => {
                             res.writeHead(200, {
                                 'Content-Type': 'application/json'
@@ -2489,7 +2541,6 @@ const server = http.createServer((req, res) => {
             },
             [linkRegex]: {
                 handle: () => {
-                    console.log('got a request to ' + req.url + ' (' +  req.method + ')');
                     const { headers } = req;
 
                     const noServers = () => {
@@ -2547,7 +2598,6 @@ const server = http.createServer((req, res) => {
                             noServers();
                         });
                     }
-                    console.log('ayyyylm oa!');
                     res.end('ayy lmao');
                 }
             },
