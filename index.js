@@ -1,11 +1,11 @@
 const http = require('http');
+const decompress = require('decompress');
 const acme = require('acme-client');
 const https = require('https');
 const unzipper = require('unzipper');
 const url = require('url');
 const archiver = require('archiver');
 const fs = require('fs');
-const aws = require('aws-sdk');
 const querystring = require('querystring');
 const crypto = require('crypto');
 const util = require('util');
@@ -15,9 +15,11 @@ const { fork } = require('child_process');
 const path = require('path');
 const WebSocket = require('ws');
 const process = require('process');
-const { verifyAccessToken, getUserHash } = require('homegames-common');
+const { getUserHash } = require('homegames-common');
 const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
+const { Binary, MongoClient } = require('mongodb');
+const amqp = require('amqplib/callback_api');
 
 const SourceType = {
     GITHUB: 'GITHUB'
@@ -27,7 +29,332 @@ const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
 };
 
+const CERTS_ENABLED = true;//process.env.CERTS_ENABLED;
+
+const DB_TYPE = process.env.DB_TYPE || 'local';
+
 const AWS_ROUTE_53_HOSTED_ZONE_ID = process.env.AWS_ROUTE_53_HOSTED_ZONE_ID;
+
+const QUEUE_HOST = process.env.QUEUE_HOST || 'localhost';
+
+const SALT_ROUNDS = process.env.SALT_ROUNDS || 10;
+
+const HASH_ITERATIONS = process.env.HASH_ITERATIONS || 100000;
+const HASH_KEY_LENGTH = process.env.HASH_KEY_LENGTH || 64;
+const HASH_DIGEST = process.env.HASH_DIGEST || 'sha512';
+
+const ELASTICSEARCH_HOST = process.env.ELASTICSEARCH_HOST;
+const ELASTICSEARCH_PORT = process.env.ELASTICSEARCH_PORT;
+const ELASTICSEARCH_GAME_INDEX = process.env.ELASTICSEARCH_GAME_INDEX;
+const ELASTICSEARCH_DEVELOPER_INDEX = process.env.ELASTICSEARCH_DEVELOPER_INDEX;
+
+const DB_HOST = process.env.DB_HOST;
+const DB_PORT = process.env.DB_PORT;
+const DB_USERNAME = process.env.DB_USERNAME || '';
+const DB_PASSWORD = process.env.DB_PASSWORD || '';
+
+const JWT_SECRET = process.env.JWT_SECRET || 'hello world!';
+
+// mongo, local (in memory)
+const AUTH_TYPE = process.env.AUTH_TYPE || 'mongo';
+
+const verifyToken = (token) => new Promise((resolve, reject) => {
+    const bearerPrefix = 'Bearer ';
+    if (!token || !token.startsWith(bearerPrefix)) {
+        reject('Invalid token');
+    } else {
+        const tokenValue = token.substring(bearerPrefix.length);
+        const tokenPieces = tokenValue.split('.');
+        if (tokenPieces.length !== 3) {
+            reject('Invalid token structure');
+        } else {
+            const tokenHeader = tokenPieces[0];
+            const tokenPayload = tokenPieces[1];
+            const tokenSignature = tokenPieces[2];
+
+            const payload = base64UrlDecode(tokenPayload);
+            const validSignature = getSignature(tokenHeader, tokenPayload);
+            if (validSignature == tokenSignature) {
+                resolve(payload);
+            } else {
+                reject('Invalid token');
+            }
+        }
+    }
+});
+
+const hashValue = (val) => {
+    return crypto.createHash('sha256').update(val).digest('hex');
+}
+
+const hashPassword = (password, salt) => new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, HASH_ITERATIONS, HASH_KEY_LENGTH, HASH_DIGEST, (error, hashedPassword) => {
+        if (error) {
+            reject(error);
+        } else {
+            resolve(hashedPassword);
+        }
+    });
+});
+
+const base64UrlDecode = (str) => {
+    const decoded = Buffer.from(str, 'base64url');
+    return JSON.parse(decoded);
+};
+
+const base64UrlEncode = (obj) => {
+    const stringified = JSON.stringify(obj);
+    return Buffer.from(stringified).toString('base64url');
+};
+
+const getSignature = (encodedHeader, encodedPayload) => {
+    const data = `${encodedHeader}.${encodedPayload}`;
+    return crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
+};
+
+
+const downloadZip = (url) =>
+  new Promise((resolve, reject) => {
+    const outDir = `/tmp/${Date.now()}`;
+    fs.mkdirSync(outDir);
+    const zipPath = `${outDir}/data.zip`;
+
+    const zipWriteStream = fs.createWriteStream(zipPath);
+
+    zipWriteStream.on('close', () => {
+            console.log('reososeoso');
+            console.log(zipPath);
+		resolve({
+			zipPath
+		});
+    });
+
+    https.get(url, (res) => {
+	res.pipe(zipWriteStream);
+	zipWriteStream.on('finish', () => {
+		zipWriteStream.close();
+	});
+    }).on('error', (err) => {
+        console.error(err);
+        reject(err);
+    });
+  });
+
+const downloadFromGithub = (owner, repo, commit = '') =>
+  new Promise((resolve, reject) => {
+    const commitString = commit ? "/" + commit : "";
+    const thing = `https://codeload.github.com/${owner}/${repo}/zip${commitString}`;
+    downloadZip(thing).then(resolve);
+  });
+
+const getMongoClient = () => {
+    const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/homegames` : `mongodb://${DB_HOST}:${DB_PORT}/homegames`;
+    console.log("URI");
+    console.log(uri);
+    const params = {};
+    if (DB_USERNAME) {
+        params.auth = {
+            username: DB_USERNAME,
+            password: DB_PASSWORD
+        };
+        params.authSource = 'admin';
+    }
+
+    return new MongoClient(uri, params);
+};
+
+const getMongoAsset = (assetId) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const assetCollection = db.collection('assets');
+        assetCollection.findOne({ assetId }).then(resolve).catch(reject);
+    });
+});
+
+const createSupportMessage = (body, sourceIp) => new Promise((resolve, reject) => {
+    const ipHash = hashValue(sourceIp);
+    getMongoCollection('supportMessages').then((collection) => {
+        const now = Date.now();
+        const oneDayAgo = now - (24 * 60 * 60 * 1000);
+        collection.find({ ipHash, 'status': 'PENDING', created: { '$gte': oneDayAgo } }).toArray().then((results) => {
+            // if we have 3 pending messages from this ip in the last 24 hours, reject
+            if (results.length >= 3) {
+                reject({ type: 'TOO_MANY_MESSAGES', message: 'Too many messages from this IP'});    
+            } else {
+                const id = generateId();
+                collection.insertOne({ id, created: now, ipHash, 'status': 'PENDING', message: body.message, email: body.email || null }).then(() => {
+                    resolve();
+                }); 
+            }
+        });
+    });
+});
+
+const createBlogPost = (userId, blogPayload) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const blogCollection = db.collection('blog');
+        blogCollection.insertOne({ id: generateId(), publishedBy: userId, created: Date.now(), title: blogPayload.title || '', content: blogPayload.content }).then(resolve).catch(reject);
+    });
+});
+
+const getBlogPost = (id) => new Promise((resolve, reject) => {
+    getMongoCollection('blog').then(collection => {
+        collection.findOne({ id }).then(post => {
+            if (!post) {
+                reject('Not found');
+            } else {
+                resolve(mapBlogPost(post, true));
+            }
+        });
+    }).catch(reject); 
+});
+
+
+const listBlogPosts = (limit, offset, sort, query, includeMostRecent) => new Promise((resolve, reject) => {
+    getMongoCollection('blog').then(collection => {
+        let dbQuery = {};
+        if (query) {
+            dbQuery = {
+              '$and': [
+                {
+                  '$or': [
+                    { title: { '$regex': query, $options: 'i' } },
+                    { content: { '$regex': query, $options: 'i' } }
+                  ]
+                }
+              ]
+            };
+        } 
+        console.log('cikciciciciic ' + limit + ', offset: ' + offset + ', include ' + includeMostRecent);
+        collection.countDocuments(dbQuery).then((count) => {
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(posts => {
+                console.log("the fuck lol " + includeMostRecent);
+                console.log(includeMostRecent);
+                if (!!includeMostRecent) {
+                    console.log('dodididin 1');
+                    const mostRecent = posts.length ? mapBlogPost(posts[0], true) : null;
+                    resolve({ posts: posts.map(p => mapBlogPost(p, false)), count, mostRecent });
+                } else {
+                    resolve({ posts: posts.map(p => mapBlogPost(p, false)), count });
+                }
+            }).catch(reject);
+        });
+    }).catch(reject);
+ 
+});
+
+const getMongoDocument = (assetId) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const documentCollection = db.collection('documents');
+        documentCollection.findOne({ assetId }).then(resolve).catch(reject);
+    });
+});
+
+const getUserRecord = (userId) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(collection => {
+        collection.findOne({ userId }).then(resolve).catch(reject);
+    });
+});
+
+const login = (request) => new Promise((resolve, reject) => {
+    const { username, password } = request;
+
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const collection = db.collection('users');
+        collection.findOne({ userId: username }).then((usernameResponse) => {
+            if (usernameResponse == null) {
+                reject('user doesnt exist');
+            } else {
+                const passwordSalt = usernameResponse.passwordSalt;//.toString('hex');
+                hashPassword(password, passwordSalt).then((passwordHash) => {
+                    if (usernameResponse.passwordHash.toString('hex') === passwordHash.toString('hex')) {
+                        resolve({
+                            username,
+                            token: generateJwt(username),
+                            isAdmin: usernameResponse.isAdmin || false,
+                            created: usernameResponse.created
+                        });
+                    } else {
+                        reject('incorrect username or password');
+                    }
+                    //collection.insertOne({ username, passwordHash, passwordSalt }).then(() => {
+                    //    const token = generateJwt(username);
+                    //    resolve({
+                    //        username, 
+                    //        token
+                    //    });
+                    //});
+                });
+            } 
+        });
+    });
+});
+
+const generateJwt = (userId) => {
+    const jwtHeader = {
+        alg: 'HS256',
+        typ: 'JWT'
+    };
+
+    const payload = { userId, iat: Date.now() };
+
+    const encodedHeader = base64UrlEncode(jwtHeader);
+    const encodedPayload = base64UrlEncode(payload);
+    const encodedSignature = getSignature(encodedHeader, encodedPayload);
+
+    console.log('jdjdjdj');
+    console.log(encodedSignature);
+    console.log('fjfjfjfjfjfjfjfjb ');
+    console.log(encodedPayload);
+
+    return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
+};
+
+const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const collection = db.collection('users');
+        collection.findOne({ userId }).then((userResponse) => {
+            if (userResponse == null) {
+                const passwordSalt = crypto.randomBytes(16).toString('hex');
+                hashPassword(password, passwordSalt).then((passwordHash) => {
+                    collection.insertOne({ userId, passwordHash, passwordSalt, created: Date.now() }).then(() => {
+                        const token = generateJwt(userId);
+                        resolve({
+                            userId, 
+                            token
+                        });
+                    });
+                });
+            } else {
+                reject('username already exists');
+            }
+        });
+    });
+});
+
+const signup = (request) => new Promise((resolve, reject) => {
+    const { username, password } = request;
+    if (!username || !password) {
+        reject('signup requires username & password');
+    } else {
+        if (AUTH_TYPE === 'mongo') {
+            console.log('babba');
+            mongoSignup(username, password).then(resolve).catch((err) => {
+                console.log('sdfdsfdks ' + err);
+                reject(err);
+            });
+        }
+    }
+});
 
 const getLatestContentRequestForIp = (ip) => new Promise((resolve, reject) => {
     const client = new aws.DynamoDB.DocumentClient({
@@ -127,50 +454,6 @@ const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
     });
 });
 
-const retryPublishRequest = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
-    const messageBody = JSON.stringify({ gameId, sourceInfoHash });
-    
-    const sqsParams = {
-        MessageBody: messageBody,
-        QueueUrl: process.env.SQS_QUEUE_URL,
-        MessageGroupId: Date.now() + '',
-        MessageDeduplicationId: Date.now() + ''
-    };
-
-    const sqs = new aws.SQS({region: 'us-west-2'});
-    
-    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
-        console.log(err);
-        console.log(sqsResponse);
-        if (err) {
-            reject(err);
-        } else {
-            resolve();
-        }
-    });
- 
-});
-
-const getDnsRecord = (name) => new Promise((resolve, reject) => {
-    const params = {
-        HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
-        StartRecordName: name,
-        StartRecordType: 'TXT'
-    };
-
-    const route53 = new aws.Route53();
-    route53.listResourceRecordSets(params, (err, data) => {
-        for (const i in data.ResourceRecordSets) {
-            const entry = data.ResourceRecordSets[i];
-            if (entry.Name === name + '.') {
-                resolve(entry.ResourceRecords[0].Value);
-            }
-        }
-        reject();
-    });
-
-});
-
 const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
 
     getDnsRecord(name).then((value) => {
@@ -197,7 +480,7 @@ const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
             HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID
         };
 
-        const route53 = new aws.Route53();
+        const route53 = new aws.Route53Client();
         route53.changeResourceRecordSets(deleteDnsParams, (err, data) => {
             const deleteParams = {
                 Id: data.ChangeInfo.Id
@@ -386,6 +669,20 @@ const generateSocketId = () => {
     return uuidv4();
 };
 
+const uploadMongo = (developerId, assetId, filePath, fileName, fileSize, fileType) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const collection = db.collection('assets');
+        collection.findOne({ assetId }).then(asset => {
+            console.log("found asset to upload");
+            console.log(asset);
+            const documentCollection = db.collection('documents');
+            documentCollection.insertOne({ developerId, assetId, data: new Binary(fs.readFileSync(filePath)), fileSize, fileType }).then(() => resolve(assetId)).catch(reject);
+        });
+    }); 
+});
+
 const updatePresence = (publicIp, serverId) => {
     console.log(`updating presence for server ${serverId}`);
     getHostInfo(publicIp, serverId).then(hostInfo => {
@@ -545,28 +842,6 @@ const getHostInfo = (publicIp, serverId) => new Promise((resolve, reject) => {
 
 });
 
-const getCognitoUser = (username) => new Promise((resolve, reject) => {
-    const params = {
-        UserPoolId: poolData.UserPoolId,
-        Username: username
-    };
-
-    const provider = new aws.CognitoIdentityServiceProvider({region: 'us-west-2'});
-
-    provider.adminGetUser(params, (err, data) => {
-        if (err) {
-            console.error(err);
-            reject('failed to get user');
-        } else {
-            const isAdminAttribute = data.UserAttributes && data.UserAttributes.filter(a => a.Name === 'custom:isAdmin').length > 0 ? data.UserAttributes.filter(a => a.Name === 'custom:isAdmin')[0] : null;
-            resolve({
-                created: data.UserCreateDate,
-                isAdmin: isAdminAttribute && isAdminAttribute.Value === 'true' ? true : false
-            });
-        }
-    });
-});
-
 const uploadThumbnail = (username, gameId, thumbnail) => new Promise((resolve, reject) => {
     const assetId = generateId();
 
@@ -585,64 +860,114 @@ const uploadThumbnail = (username, gameId, thumbnail) => new Promise((resolve, r
 });
 
 const getProfileInfo = (userId) => new Promise((resolve, reject) => {
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
+    getMongoProfileInfo(userId).then(resolve).catch(reject);
+});
 
-    const params = {
-        TableName: 'developer',
-        Key: {
-            'developer_id': {
-                S: userId 
-            }
-        }
-    };
+const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const collection = db.collection('users');
+        console.log('for ' + userId);
+        collection.findOne({ userId }).then((userResponse) => {
+            console.log('found user');
+            console.log(userResponse);
+            const { userId, created, image, description } = userResponse;
 
-    listGamesForAuthor({ author: userId }).then((games) => {
-        ddb.getItem(params, (err, data) => {
-            if (err) {
-                console.log(err);
-                reject();
-            } else {
-                if (data.Item) {
-                    resolve({
-                        description: data.Item.description?.S,
-                        image: data.Item.image?.S,
-                        qrValue: data.Item.qr_value?.S,
-                        qrMeta: data.Item.qr_meta?.S,
-                        games
-                    });
-                } else {
-                    resolve({
-                        games
-                    });
-                }
-            }
+                resolve({
+                    username: userId,
+                    created,
+                    image, 
+                    description
+                });
         });
     });
 });
 
-const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((resolve, reject) => {
-    const messageBody = JSON.stringify({ userId, assetId, type: 'gameImage', gameId });
+const updateGameSearch = (gameData) => new Promise((resolve, reject) => {
+    const body = JSON.stringify(gameData);
     
-    const sqsParams = {
-        MessageBody: messageBody,
-        QueueUrl: process.env.SQS_IMAGE_QUEUE_URL,
-        MessageGroupId: Date.now() + '',
-        MessageDeduplicationId: Date.now() + ''
+    const options = {
+        hostname: ELASTICSEARCH_HOST,
+        port: ELASTICSEARCH_PORT,
+        path: `/games/_doc/${gameData.gameId}`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
     };
+    
+    const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+            data += chunk;
+        });
 
-    console.log('params!');
-    console.log(sqsParams);
-    
-    const sqs = new aws.SQS({region: 'us-west-2'});
-    
-    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
-        console.log(err);
-        console.log(sqsResponse);
-        resolve();
+        res.on('end', () => {
+            const parsed = JSON.parse(data);
+            resolve();
+        });
     });
- 
+
+    req.on('error', (e) => {
+        console.error(`problem with request: ${e.message}`);
+        reject();
+    });
+
+    req.write(body);
+    req.end();
+
+});
+
+const createGame = (developerId, thumbnailAssetId, fields, files) => new Promise((resolve, reject) => {
+    console.log('creating game with thumbnail asset ' + thumbnailAssetId);
+    getMongoCollection('games').then(collection => {
+        const gameId = generateId();
+        const gameData = {
+            gameId,
+            description: fields?.description?.[0] || '',
+            name: fields?.name?.[0] || '',
+            developerId,
+            created: Date.now()
+        };
+
+        const beforeMongoInsertsId = Object.assign({}, gameData);
+        collection.insertOne(gameData).then(() => {
+            resolve(beforeMongoInsertsId);
+            updateGameSearch(beforeMongoInsertsId).catch((err) => {
+                console.error("Failed to update game search");
+                console.error(err);
+            });
+            createGameImagePublishRequest(developerId, thumbnailAssetId, gameId).catch((err) => {
+                console.error('Failed to create game image request');
+                console.error(err);
+            });
+        }).catch(reject);
+    });
+});
+
+const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((resolve, reject) => {
+    amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+        if (err) {
+            reject(err);
+        } else {
+            conn.createChannel((err1, channel) => {
+                if (err1) {
+                    reject(err1);
+                } else {
+                    console.log('created channel');
+                    channel.assertQueue('homegames-jobs', {
+                        durable: false
+                    });
+
+                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })));
+                    console.log('sent message');
+                    resolve();
+                }
+            });
+        }
+    });
 });
 
 const createUserImagePublishRequest = (userId, assetId) => new Promise((resolve, reject) => {
@@ -668,76 +993,69 @@ const createUserImagePublishRequest = (userId, assetId) => new Promise((resolve,
  
 });
 
-const updateProfileInfo = (userId, { description, qrValue, qrMeta, image }) => new Promise((resolve, reject) => {    
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
+const updateProfileInfo = (userId, { description, image }) => new Promise((resolve, reject) => {
+    updateMongoProfileInfo(userId, { description, image }).then(resolve).catch(reject);
+});
+
+const getMongoCollection = (collectionName) => new Promise((resolve, reject) => {
+    const client = getMongoClient();
+    client.connect().then(() => {
+        const db = client.db('homegames');
+        const collection = db.collection(collectionName);
+        resolve(collection);
+    });
+});
+
+const createProfileImageTask = (userId, assetId) => new Promise((resolve, reject) => {
+    amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+        console.log('erererer');
+        console.log(err);
+        console.log("FJSDFJKSDF");
+        console.log(assetId);
+        console.log(conn);
+        if (err) {
+            reject(err);
+        } else {
+            conn.createChannel((err1, channel) => {
+                if (err1) {
+                    reject(err1);
+                } else {
+                    console.log('created channel');
+                    channel.assertQueue('homegames-jobs', {
+                        durable: false
+                    });
+
+                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PROFILE_IMAGE_APPROVAL_REQUEST', userId, assetId })));
+                    console.log('sent message');
+                    resolve();
+                }
+            });
+        }
     });
 
-    const attributes = {};
+});
 
-    if (description && description.length <= 200) {
-        attributes['description'] = {
-            Action: 'PUT',
-            Value: {
-                S: description
-            }
-        }
-    }
-
-    if (qrValue && qrValue.length <= 200) {
-        attributes['qr_value'] = {
-            Action: 'PUT',
-            Value: {
-                S: qrValue
-            }
-        }
-    }
-
-    if (qrMeta && qrMeta.length <= 200) {
-        attributes['qr_meta'] = {
-            Action: 'PUT',
-            Value: {
-                S: qrMeta
-            }
-        }
-    }
-
-    if (image) {
-        createUserImagePublishRequest(userId, image);
-//        attributes['image'] = {
-//            Action: 'PUT',
-//            Value: {
-//                S: image 
-//            }
-//        }
-    }
-
-    if (Object.keys(attributes).length < 1) {
-//        reject('Nothing to update');
-        resolve();
-    } else {
-        console.log('updating user ' + userId);
-        console.log('with these attributes');
-        console.log(attributes);
-        const updateParams = {
-            TableName: 'developer',
-            Key: {
-                'developer_id': {
-                    S: userId
-                }
-            },
-            AttributeUpdates: attributes
-        };
-
-        ddb.updateItem(updateParams, (err, putResult) => {
-            if (err) {
-                reject(err);
+const updateMongoProfileInfo = (userId, { description, image }) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(users => {
+        users.findOne({ userId }).then((foundUser) => {
+            console.log('fiouffofu');
+            console.log(foundUser);
+            if (!foundUser) {
+                reject('User not found');
             } else {
+                if (image) {
+                    createProfileImageTask(userId, image);
+                }
+                if (description && foundUser.description != description) {
+                    users.updateOne({ userId }, { "$set": { description } }).catch(reject).then(resolve);
+                } else {
+                    resolve();
+                }
+
                 resolve();
             }
         });
-    }
-
+    });
 });
 
 const getLatestGameVersion = (gameId) => new Promise((resolve, reject) => {
@@ -877,36 +1195,17 @@ const verifyCode = (code, requestId) => new Promise((resolve, reject) => {
 });
 
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
-    const readClient = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_requests',
-        IndexName: 'request_id-index',
-        KeyConditionExpression: '#requestId = :requestId',
-        ExpressionAttributeNames: {
-            '#requestId': 'request_id'
-        },
-        ExpressionAttributeValues: {
-            ':requestId': requestId
-        }
-    };
-
-    readClient.query(params, (err, result) => {
-        if (err) {
-            reject();
-        } else {
-            if (result.Items.length != 1) {
-                console.log('wrong length');
-                console.log(result.Items);
-                reject();
+    console.log('looking for ' + requestId);
+    getMongoCollection('publishRequests').then((collection) => {
+        collection.findOne({ requestId }).then((result) => {
+            if (!result) {
+                reject('not found');
             } else {
-                resolve(result.Items[0]);
+                resolve(result);
             }
-        }
+        });
     });
- 
+
 });
 
 
@@ -915,39 +1214,13 @@ const getS3Url = (gameId, requestId) => {
     return `https://hg-games.s3-us-west-2.amazonaws.com/${gameId}/${requestId}/code.zip`;
 };
 
-const updatePublishRequestState = (gameId, sourceInfoHash, newStatus) => new Promise((resolve, reject) => {
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    const updateParams = {
-        TableName: 'publish_requests',
-        Key: {
-            'game_id': {
-                S: gameId
-            },
-            'source_info_hash': {
-                S: sourceInfoHash
-            }
-        },
-        AttributeUpdates: {
-            'status': {
-                Action: 'PUT',
-                Value: {
-                    S: newStatus
-                }
-            }
-        }
-    };
-
-    ddb.updateItem(updateParams, (err, putResult) => {
-        console.log(err);
-        if (err) {
-            reject();
-        } else {
+const updatePublishRequestState = (requestId, gameId, sourceInfoHash, newStatus) => new Promise((resolve, reject) => {
+    getMongoCollection('publishRequests').then((publishRequests) => {
+        publishRequests.updateOne({ requestId }, { "$set": { status: newStatus } }).catch(reject).then(() => {
             resolve();
-        }
+        });
     });
+
 });
 
 const emitEvent = (requestId, eventType, message = null) => new Promise((resolve, reject) => {
@@ -1041,30 +1314,36 @@ const getReqBody = (req, cb) => {
 };
 
 const getGame = (gameId) => new Promise((resolve, reject) => {
-
-    const client = new aws.DynamoDB({
-        region: 'us-west-2'
+    getMongoCollection('games').then(collection => {
+        collection.findOne({ gameId }).then(game => {
+            resolve({ 
+                id: game.gameId,
+                description: game.description,
+                name: game.name,
+                created: game.created,
+                developerId: game.developerId,
+                thumbnail: game.thumbnail
+            });
+        });
     });
+});
 
-    const params = {
-        TableName: process.env.GAME_TABLE,
-        Key: {
-            'game_id': {
-                S: gameId 
-            }
-        }
-    };
-
-    client.getItem(params, (err, result) => {
-        if (err) {
-            reject(err.toString());
-        } else {
-            if (result.Item) {
-                resolve(mapGame(result.Item));
-            } else {
-                reject('No results');
-            }
-        }
+const updateGameIndex = (gameId) => new Promise((resolve, reject) => {
+    getGame(gameId).then(gameData => {
+        console.log('need to post to elasticsearch');
+        console.log(gameData);
+        const gameBody = {
+            id: gameData.id,
+            description: gameData.description,
+            name: gameData.name,
+            created: gameData.created,
+            developerId: gameData.developerId,
+            thumbnail: gameData.thumbnail
+        };
+        elasticSearchPost('/games/_doc/' + gameId, gameBody).then(() => {
+            console.log('cool!1!jsdfgkfsdg');
+            resolve();
+        });
     });
 });
 
@@ -1074,98 +1353,81 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
         console.log(updateParams);
         resolve();
     } else {
-        const ddb = new aws.DynamoDB({
-            region: 'us-west-2'
-        });
-
-        const nowString = '' + Date.now();
-
-        const attributeUpdates = {
-            'updated': {
-                Action: 'PUT',
-                Value: {
-                    S: nowString    
-                }
-            }
-        };
 
         if (updateParams.description) {
-            attributeUpdates.description = {
-                Action: 'PUT',
-                Value: {
-                    S: updateParams.description
-                }
-            };
+            getMongoCollection('games').then((games) => {
+                games.updateOne({ gameId }, { "$set": { description: updateParams.description } }).catch(reject).then(() => {
+                    // dumb
+                    games.findOne({ gameId }).then((game) => {
+                        const gameResult = {
+                            id: game.gameId,
+                            description: game.description,
+                            created: game.description,
+                            thumbnail: game.thumbnail,
+                            developerId: game.developerId,
+                            name: game.name
+                        };
+                        console.log(game);
+                        console.log("fdsfds");
+                        resolve(gameResult);
+                    }).catch(reject);
+                });
+            });
         }
 
-        if (updateParams.published_state) {
-            attributeUpdates.published_state = {
-                Action: 'PUT',
-                Value: {
-                    S: updateParams.published_state
-                }
-            };
-        }
-        const updateRequestParams = {
-            TableName: process.env.GAME_TABLE,
-            Key: {
-                'game_id': {
-                    S: gameId
-                }
-            },
-            AttributeUpdates: attributeUpdates
-        };
-
-        ddb.updateItem(updateRequestParams, (err, putResult) => {
-            if (err) {
-                console.log(err);
-                reject();
-            } else {
-                resolve();
-            }
-        });
+        //if (updateParams.published_state) {
+        //    attributeUpdates.published_state = {
+        //        Action: 'PUT',
+        //        Value: {
+        //            S: updateParams.published_state
+        //        }
+        //    };
+        //}
     }
 });
 
-const listAssets = (developerId) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB({
-        region: 'us-west-2'
+const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((resolve, reject) => {
+    console.log('this is query ' + query);
+    console.log('dfdsfdsf ' + limit);
+    console.log(offset);
+    getMongoCollection('assets').then(collection => {
+        let dbQuery = { developerId };
+        if (query) {
+            dbQuery = {
+              '$and': [
+                { developerId },
+                {
+                  '$or': [
+                    { name: { '$regex': query, $options: 'i' } },
+                    { description: { '$regex': query, $options: 'i' } },
+                    { assetId: { '$regex': query, $options: 'i' } }
+                  ]
+                }
+              ]
+            };
+        } 
+        collection.countDocuments(dbQuery).then((count) => {
+            console.log('dsjfjsdfdsf');
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
+                resolve({ assets, count });
+            }).catch(reject);
+        });
+    }).catch(reject);
+});
+
+const createAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
+    if (DB_TYPE == 'mongo') {
+        console.log('creating asset with id ' + assetId);
+        createMongoAssetRecord(developerId, assetId, size, name, metadata, description).then(resolve).catch(reject);
+    } else if (DB_TYPE == 'dynamo') {
+        createRecord(developerId, assetId, size, name, metadata).then(resolve).catch(reject);
+    }
+});
+
+const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(assetCollection => {
+        assetCollection.insertOne({ created: Date.now(), developerId, assetId, size, name, metadata, description }).then(() => resolve({assetId})).catch(reject);
     });
-
-    const params = {
-        TableName: 'homegames_assets',
-        ScanIndexForward: false,
-        KeyConditionExpression: '#developer_id = :developer_id',
-        ExpressionAttributeNames: {
-            '#developer_id': 'developer_id'
-        },
-        ExpressionAttributeValues: {
-            ':developer_id': {
-                S: developerId
-            }
-        }
-    };
-
-    client.query(params, (err, results) => {
-        if (!err) {
-            const res = results.Items.map(i => {
-                return {
-                    'developerId': i.developer_id.S,
-                    'size': Number(i.size.N),
-                    'assetId': i.asset_id.S,
-                    'created': Number(i.created_at.N),
-                    'status': i['status'].S,
-                    'type': JSON.parse(i['metadata'].S)['Content-Type'],
-                    'name': i.name && i.name.S || 'No name available'
-                };
-            });
-            resolve(res);
-        } else {
-            console.log(err);
-            reject();
-        }
-    });
-
 });
 
 const createRecord = (developerId, assetId, size, name, metadata) => new Promise((resolve, reject) => {
@@ -1241,110 +1503,120 @@ const getPublishRequestEvents = (requestId) => new Promise((resolve, reject) => 
 });
 
 const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
+    getMongoCollection('publishRequests').then((collection) => {
+        collection.find({ status: 'PENDING_PUBLISH_APPROVAL' }).toArray().then((results) => {
+            resolve({ requests: results });
+        });
     });
+});
 
-    const params = {
-        TableName: 'publish_requests',
-        IndexName: 'status-index',
-        KeyConditionExpression: '#status = :status',
-        ExpressionAttributeNames: {
-            '#status': 'status'
-        },
-        ExpressionAttributeValues: {
-            ':status': 'PENDING_PUBLISH_APPROVAL' 
-        }
-    };
+const adminAcknowledgeMessage = (messageId) => new Promise((resolve, reject) => {
+    getMongoCollection('supportMessages').then((collection) => {
+        collection.findOne({ id: messageId }).then(supportMessage => {
+            console.log('found message');
+            console.log(supportMessage);
+            collection.updateOne({ id: messageId }, { "$set": { 'status': 'ACKNOWLEDGED' } }).then(resolve).catch(reject);
+        });
+    });
+});
 
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-        }
-        resolve({requests: data.Items});
+const adminListSupportMessages = (page, limit) => new Promise((resolve, reject) => {
+    const actualLimit = limit || 10;
+    const skip = ( page - 1 ) * actualLimit;
+ 
+    getMongoCollection('supportMessages').then((collection) => {
+        collection.find({ status: 'PENDING' }).skip(skip).limit(actualLimit).toArray().then((results) => {
+            resolve({ requests: results });
+        });
     });
 
 });
 
 const adminListFailedPublishRequests = () => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_requests',
-        IndexName: 'status-index',
-        KeyConditionExpression: '#status = :status',
-        ExpressionAttributeNames: {
-            '#status': 'status'
-        },
-        ExpressionAttributeValues: {
-            ':status': 'FAILED' 
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-        }
-        resolve({requests: data.Items});
+    getMongoCollection('publishRequests').then((collection) => {
+        collection.find({ status: 'FAILED' }).toArray().then((results) => {
+            resolve({ requests: results });
+        });
     });
 });
-
-const adminListProcessingPublishRequests = () => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_requests',
-        IndexName: 'status-index',
-        KeyConditionExpression: '#status = :status',
-        ExpressionAttributeNames: {
-            '#status': 'status'
-        },
-        ExpressionAttributeValues: {
-            ':status': 'PROCESSING' 
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-        }
-        resolve({requests: data.Items});
-    });
-
-});
-
-
 
 const listPublishRequests = (gameId) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_requests',
-        KeyConditionExpression: '#game_id = :game_id',
-        ExpressionAttributeNames: {
-            '#game_id': 'game_id'
-        },
-        ExpressionAttributeValues: {
-            ':game_id': gameId
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-        }
-        resolve({requests: data.Items});
+    getMongoCollection('publishRequests').then(collection => {
+        collection.find({ gameId }).limit(100).toArray().then((requests) => {
+            resolve(requests.map(r => { 
+                return {
+                    id: r.requestId,
+                    'status': r['status'],
+                    'assetId': r['assetId'],
+                    created: r.created,
+                    adminMessage: r.adminMessage,
+                    gameVersionId: r.versionId
+                }
+            }));
+        });
     });
 
 });
 
-const listGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
+const listGamesForAuthor = (params) => new Promise((resolve, reject) => {
+    mongoListGamesForAuthor(params).then(resolve).catch(reject);
+});
+
+const listPublicGamesForAuthor = (params) => new Promise((resolve, reject) => {
+    console.log('fiufiufiufi elastic');
+    console.log(params);
+    const offset = params.offset|| 0;
+    const limit = params.limit || 10;
+    const ting = { 
+        from: offset,
+        size: limit,
+        query: {
+            'multi_match': { 
+                query: params.author, 
+                fields: ['developerId'] 
+            }
+        }
+    };
+
+    console.log('this is ting');
+    console.log(JSON.stringify(ting));
+
+    elasticSearchPost('/games/_search', ting).then((results) => {
+        console.log("search results!');');");
+        console.log(results);
+        const totalResults = results.hits.total.value;
+        const pageCount = Math.ceil(totalResults / limit);
+        resolve({
+            total: totalResults,
+            games: results.hits.hits.map(h => mapElasticSearchGame(h)),
+            pageCount
+        })
+
+    });
+});
+
+const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
+    console.log("gonna list games");
+    getMongoCollection('games').then(collection => {
+        const actualLimit = limit || 10;
+        const skip = ( page - 1 ) * actualLimit;
+        console.log("DKKDSFKDSFK NEED TO MOVE THIS ??");
+        console.log(skip);
+        collection.find({ developerId: author }).limit(actualLimit).skip(skip).toArray().then(results => {//{ developerId: author }).then(results => {//.skip(skip).limit(actualLimit).then(results => {
+           resolve(results.map(r => {
+                return {
+                    id: r.gameId,
+                    name: r.name,
+                    description: r.description,
+                    createdBy: r.createdBy,
+                    createdAt: r.createdAt
+                }
+           }));
+        });
+    });
+});
+
+const dynamoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
 
     const client = new aws.DynamoDB.DocumentClient({
         region: process.env.DYNAMO_REGION
@@ -1363,8 +1635,6 @@ const listGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, re
     };
 
     client.query(params, (err, data) => {
-        console.log("DIDIADIADI");
-        console.log(data);
         if (err) {
             reject([{error: err}]);
         } else {
@@ -1375,37 +1645,52 @@ const listGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, re
 });
 
 const getGameDetails = (gameId) => new Promise((resolve, reject) => { 
-
-    getGame(gameId).then(gameDetails => {
-        const client = new aws.DynamoDB.DocumentClient({
-            region: process.env.DYNAMO_REGION
-        });
-
-        const params = {
-            TableName: 'game_versions',
-            // IndexName: 'name_index',
-            KeyConditionExpression: '#game_id = :game_id',
-            ExpressionAttributeNames: {
-                '#game_id': 'game_id'
-            },
-            ExpressionAttributeValues: {
-                ':game_id': gameId
-            }
-        };
-
-        client.query(params, (err, data) => {
-            if (err) {
-                console.log(err);
-                reject(err);
+    getMongoCollection('games').then(collection => {
+        collection.findOne({ gameId }).then(gameResult => {
+            if (gameResult == null) {
+                reject('Game not found');
             } else {
-                resolve({
-                    ...gameDetails,
-                    versions: data.Items.map(mapGameVersion)
+                getMongoCollection('gameVersions').then(versionCollection => {
+                    versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
+                    console.log('versions!');
+                    console.log(versions);
+                        resolve({
+                            game: {
+                                name: gameResult.name,
+                                description: gameResult.description,
+                                created: gameResult.created,
+                                developerId: gameResult.developerId,
+                                thumbnail: gameResult.thumbnail,
+                                id: gameResult.gameId
+                            },
+                            versions: versions.map(v => {
+                                return {
+                                    id: v.versionId,
+                                    published: v.publishedAt,
+                                    assetId: v.sourceAssetId
+                                }
+                            })
+                        });
+                    });
                 });
             }
         });
     });
 });
+
+const assetResponse = (asset) => {
+    console.log('ayo!');
+    console.log(asset);
+    return {
+        id: asset.assetId,
+        developerId: asset.developerId,
+        name: asset.name,
+        created: asset.created,
+        description: asset.description,
+        size: asset.size,
+        type: asset.metadata?.['Content-Type'] || null
+    }
+};
 
 const mapGameVersion = (gameVersion) => {
     return {
@@ -1463,60 +1748,256 @@ const mapGame = (game) => {
 
 let gamesCache = {};
 
-const listGames = (limit = 10, offset = 0, sort = DEFAULT_GAME_ORDER, query = null, tags = []) => new Promise((resolve, reject) => {
-    if (gamesCache.timestamp && gamesCache.timestamp > Date.now() - (1 * 1000 * 60)) { //1 min
-        resolve(gamesCache.pages);
-    } else {
-        console.log('fetching from dynamo');
-        const client = new aws.DynamoDB.DocumentClient({
-            region: process.env.DYNAMO_REGION
-        });
-
-        const queryParams = {
-            TableName: process.env.GAME_TABLE,
-            Limit: 6,
-            IndexName: 'name_index',
-            KeyConditionExpression: '#published_state = :approved',
-            ExpressionAttributeNames: {
-                '#published_state': 'published_state',
-            },
-            ExpressionAttributeValues: {
-                ':approved': 'APPROVED'
-            }
-        };
-
-        // get data from dynamo in pages of 1MB by default or Limit if present
-        // dumb and expensive because we can support more than Limit, but 1MB is a lot and is weird to get in one big blob, so paginate mostly for user experience
-        // should use ES cache if we get a lot of traffic
-        const pages = {};
-        let pageCount = 1;
-
-        const makeQueries = (lastResult) => new Promise((resolve, reject) => {
-
-            client.query(queryParams, (err, data) => {
-
-                if (err) {
-                    console.log(err);
-                    reject();
-                } else {
-                    if (data.Items.length) {
-                        pages[pageCount++] = data.Items.map(mapGame);
-                    }
-                    if (data.LastEvaluatedKey) {
-                        queryParams.ExclusiveStartKey = data.LastEvaluatedKey;
-                        makeQueries(queryParams).then(resolve);
-                    } else {
-                        gamesCache = {pages, timestamp: Date.now()};
-                        resolve(pages);
-                    }
-                }
-                     
-            });
+const elasticSearchPost = (path, data) => new Promise((resolve, reject) => {
+    const body = JSON.stringify(data);
     
+    const options = {
+        hostname: ELASTICSEARCH_HOST,
+        port: ELASTICSEARCH_PORT,
+        path,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+    };
+    
+    const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+            data += chunk;
         });
 
-        makeQueries().then(resolve);
+        res.on('end', () => {
+            const parsed = JSON.parse(data);
+            console.log('parsed"');
+            console.log(parsed);
+            resolve(parsed);
+        });
+    });
+
+    req.on('error', (e) => {
+        console.error(`problem with request: ${e.message}`);
+    });
+
+    req.write(body);
+    req.end();
+});
+
+
+const search = (indexes, query, offset = 0, limit = 10) => new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+        from: offset,
+        size: limit,
+        query: {
+            bool: {
+                should: [
+                    {
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["developerId", "description", "name"],
+	                     "fuzziness": "AUTO"
+                        }
+                    },
+                    {
+                        "wildcard": {
+                            "name": {
+                                value: `*${query}*`
+                            }
+                        }
+                    },
+                    {
+                        "wildcard": {
+                            "developerId": {
+                                value: `*${query}*`
+                            }
+                        }
+                    },
+                    {
+                        "wildcard": {
+                            "description": {
+                                value: `*${query}*`
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    });
+    
+    const options = {
+        hostname: ELASTICSEARCH_HOST,
+        port: ELASTICSEARCH_PORT,
+        path: `/${indexes}/_search`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+    };
+    
+    const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+            data += chunk;
+        });
+
+        res.on('end', () => {
+            const parsed = JSON.parse(data);
+            console.log('parsed"');
+            console.log(parsed);
+            resolve(parsed.hits);
+        });
+    });
+
+    req.on('error', (e) => {
+        console.error(`problem with request: ${e.message}`);
+    });
+
+    req.write(body);
+    req.end();
+});
+
+const getIndexData = (indexes, limit, offset) => new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+        from: offset,
+        size: limit
+    });
+    
+    const options = {
+        hostname: ELASTICSEARCH_HOST,
+        port: ELASTICSEARCH_PORT,
+        path: `/${indexes}/_search`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+    };
+    
+    const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+            data += chunk;
+        });
+
+        res.on('end', () => {
+            const parsed = JSON.parse(data);
+            console.log('parsed"');
+            console.log(parsed);
+            resolve(parsed.hits);
+        });
+    });
+
+    req.on('error', (e) => {
+        console.error(`problem with request: ${e.message}`);
+    });
+
+    req.write(body);
+    req.end();
+});
+
+// response model
+const mapElasticSearchGame = (_game) => {
+    const game = _game._source;
+    return {
+        id: game.gameId,
+        ...game
     }
+}
+
+const mapBlogPost = (post, includeContent) => {
+    const mapped = {
+        id: post.id,
+        publishedBy: post.publishedBy,
+        created: post.created,
+        title: post.title || ''
+    }
+    if (includeContent) {
+        mapped.content = post.content;
+    }
+
+    return mapped;
+};
+
+const mapMongoGame = (game) => {
+    return {
+        id: game.gameId,
+        gameId: game.gameId,
+        description: game.description || '',
+        name: game.name || '',
+        developerId: game.developerId,
+        created: game.created,
+        thumbnail: game.thumbnail 
+    };
+};
+
+const listGames = (limit = 6, offset = 0, sort = DEFAULT_GAME_ORDER, query = null, tags = []) => new Promise((resolve, reject) => {
+//    if (gamesCache.timestamp && gamesCache.timestamp > Date.now() - (1 * 1000 * 60)) { //1 min
+//        resolve(gamesCache.pages);
+//    } else {
+        if (query) {
+            console.log('limit,fdsf ' + offset + ", " + limit);
+            search([ELASTICSEARCH_GAME_INDEX], query, Math.max(0, offset), limit).then((results) => {
+                console.log("RUERUESLUE");
+                console.log(results);
+                const totalResults = results.total.value;
+                const pageCount = Math.ceil(totalResults / limit);
+                resolve({
+                    games: results.hits.map(h => mapElasticSearchGame(h)),
+                    pageCount,
+                    total: totalResults,
+                });
+
+            });
+        } else { 
+            console.log('sdjkfsdjkfh ' + limit);
+            console.log(ELASTICSEARCH_GAME_INDEX);
+            getIndexData([ELASTICSEARCH_GAME_INDEX], limit, offset).then((results) => {
+                if (!results) {
+                    resolve({ games: [], pageCount: 0 });
+                } else {
+                    console.log('got results');
+                    console.log(results.total);
+                    const totalResults = results.total.value;
+//                    const currentPage = Math.floor(offset / limit);
+                    const pageCount = Math.ceil(totalResults / limit);
+//                    console.log(results.hits.map(f => f._source));
+                    
+                    resolve({
+                        games: results.hits.map(h => mapElasticSearchGame(h)),
+                        pageCount,
+                        total: totalResults
+                    });
+                }
+            });
+        }
+//    }
+});
+
+const listMyGames = (developerId, limit = 10, offset = 0, query) => new Promise((resolve, reject) => {
+     getMongoCollection('games').then(collection => {
+        let dbQuery = { developerId };
+        if (query) {
+            dbQuery = {
+              '$and': [
+                { developerId },
+                {
+                  '$or': [
+                    { name: { '$regex': query, $options: 'i' } },
+                    { description: { '$regex': query, $options: 'i' } }
+                  ]
+                }
+              ]
+            };
+        } 
+        collection.countDocuments(dbQuery).then((count) => {
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(games => {
+                resolve({ games: games.map(mapMongoGame), count });
+            }).catch(reject);
+        });
+    }).catch(reject);
+   
 });
 
 const getGameVersion = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
@@ -1578,49 +2059,12 @@ const getGameVersion = (gameId, sourceInfoHash) => new Promise((resolve, reject)
 
 });
 
-const setGameReviewed = (gameId, version) => new Promise((resolve, reject) => {
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    const updateParams = {
-        TableName: 'game_versions',
-        Key: {
-            'game_id': {
-                S: gameId
-            },
-            'version': {
-                N: version + ''
-            }
-        },
-        AttributeUpdates: {
-            'is_reviewed': {
-                Action: 'PUT',
-                Value: {
-                    BOOL: true
-                }
-            }
-        }
-    };
-
-    ddb.updateItem(updateParams, (err, putResult) => {
-        console.log(err);
-        if (err) {
-            reject();
-        } else {
-            resolve();
-        }
-    });
-});
-
-
-
 const adminPublishRequestAction = (requestId, action, message) => new Promise((resolve, reject) => {
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    if (!action || action !== 'reject' && action !== 'approve') {
+    console.log('huh');
+    console.log(requestId);
+    console.log(action);
+    console.log(message);
+    if (!action || (action !== 'reject' && action !== 'approve')) {
         reject('invalid action');
     }
 
@@ -1635,52 +2079,13 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
     const newStatus = action === 'approve' ? 'PUBLISHED' : 'REJECTED';
 
     getPublishRequest(requestId).then(requestData => {
-        const sourceInfoHash = requestData.source_info_hash;
-        const gameId = requestData.game_id;
-
-        getGameVersion(gameId, sourceInfoHash).then((gameVersion) => {
-            console.log('this is game version');
-            console.log(gameVersion);
-            if (gameVersion && newStatus === 'PUBLISHED') {
-                setGameReviewed(gameId, gameVersion.version);
-            }
-            const updateParams = {
-                TableName: 'publish_requests',
-                Key: {
-                    'game_id': {
-                        S: gameId
-                    },
-                    'source_info_hash': {
-                        S: sourceInfoHash
-                    }
-                },
-                AttributeUpdates: {
-                    'status': {
-                        Action: 'PUT',
-                        Value: {
-                            S: newStatus
-                        }
-                    },
-                    'adminMessage': {
-                        Action: 'PUT',
-                        Value: {
-                            S: message
-                        }
-                    }
-                }
-            };
-
-            ddb.updateItem(updateParams, (err, putResult) => {
-                if (err) {
-                    console.log(err);
-                    reject();
-                } else {
-                    resolve(gameId);
-                }
-            });
+        const gameId = requestData.gameId;
+        console.log("this is publish request");
+        console.log(requestData);
+        getMongoCollection('publishRequests').then((publishRequests) => {
+            publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => resolve(gameId));
         });
     });
-
 });
 
 let s3Cache;
@@ -1794,17 +2199,25 @@ const publishRequestEventsRegex = '/publish_requests/(\\S*)/events';
 const gameDetailRegex = '/games/(\\S*)';
 const gameVersionDetailRegex = '/games/(\\S*)/version/(\\S*)';
 const healthRegex = '/health';
+const adminListSupportMessagesRegex = '/admin/support_messages';
+const adminAckRegex = '/admin/acknowledge';
 const adminListPendingPublishRequestsRegex = '/admin/publish_requests';
 const adminListFailedPublishRequestsRegex = '/admin/publish_requests/failed';
-const adminRetryRequestRegex = '/admin/publish_requests/retry';
 const assetsListRegex = '/assets';
 const verifyPublishRequestRegex = '/verify_publish_request';
 const listGamesRegex = '/games';
+const listMyGamesRegex = '/my-games';
 const podcastRegex = '/podcast';
 const linkRegex = '/link';
 const ipRegex = '/ip';
 const servicesRegex = '/services';
 const serviceRequestsRegex = '/service_requests/(\\S*)';
+const loginRegex = '/auth/login';
+const signupRegex = '/auth/signup';
+const createBlogRegex = '/admin/blog';
+const blogRegex = '/blog';
+const blogDetailRegex = '/blog/(\\S*)';
+const githubLinkRegex = '/github_link';
 
 // terrible names
 const submitPublishRequestRegex = '/public_publish';
@@ -1817,7 +2230,66 @@ const bugsRegex = '/bugs';
 const contactRegex = '/contact';
 
 const verifyDnsRegex = '/verifyDns';
-const certRequestRegex = '/cert';
+const certRequestRegex = '/request-cert';
+const certStatusRegex = '/cert-status';
+const assetsRegex = '/assets/(\\S*)';
+
+const publishRequestMessage = (userId, gameId, assetId, requestId) => new Promise((resolve, reject) => {
+    amqp.connect('amqp://localhost', (err, conn) => {
+        console.log('erererer');
+        console.log(err);
+        console.log(conn);
+        conn.createChannel((err1, channel) => {
+            console.log('created channel');
+            channel.assertQueue('publish_requests', {
+                durable: false
+            });
+
+            channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PUBLISH_REQUEST', userId, gameId, assetId, requestId })));
+            console.log('sent message');
+            resolve();
+        });
+    });
+});
+
+const createPublishRequestRecord = (userId, assetId, gameId) => new Promise((resolve, reject) => {
+    getMongoCollection('publishRequests').then(collection => {
+        const requestId = generateId();
+        const versionId = generateId();
+        collection.insertOne({ userId, created: Date.now(), assetId, gameId, versionId, requestId, 'status': 'CREATED' }).then(() => {
+            resolve({ requestId });
+        });
+    });
+});
+
+const submitPublishRequest = (userId, gameId, fields, files) => new Promise((resolve, reject) => {
+    const file = files.file?.[0];
+    console.log("FIELS!");
+    console.log(files);
+    if (file.size > 2 * 1000 * 1000) {
+        // accept 2mb max
+        reject('too big');
+    } else {
+        console.log("need to put in doc");
+        console.log('and send message');
+        const assetId = generateId();
+
+        createPublishRequestRecord(userId, assetId, gameId).then((requestRecord) => {
+            const requestId = requestRecord.requestId;
+            createAssetRecord(userId, assetId, file.size, `publish_request_${requestId}.zip`, {}).then((assetRecord) => {
+                console.log('asset record ' );
+                console.log(assetRecord);
+                console.log('ofofofof');
+                console.log(file);
+                getMongoCollection('documents').then(documentCollection => {
+                    documentCollection.insertOne({ developerId: userId, assetId, data: new Binary(fs.readFileSync(file)), fileSize: file.size, fileType: 'application/zip' }).then(() => {
+                        publishRequestMessage(userId, gameId, assetId, requestId).then(resolve({ requestId })).catch(reject);
+                    }).catch(reject);
+                });
+            });
+        });
+    }
+});
 
 const requestCert = (publicIp) => new Promise((resolve, reject) => {
     console.log('need to do the thing');
@@ -1850,9 +2322,139 @@ const getPublicIp = (req) => {
     return req.ip || connection && connection.remoteAddress || socket && socket.remoteAddress || null;
 };
 
+const getCertRecord = (publicIp) => new Promise((resolve, reject) => {
+    getMongoCollection('certs').then((collection) => {
+        collection.findOne({ ip: publicIp }).then((result) => {
+            console.log('reuslt!');
+            console.log(result);
+            resolve(result);
+        });
+    });
+});
+
+const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
+    const body = {
+        certFound: false,
+        certExpiration: null,
+        certIp: publicIp
+    };
+
+    getCertRecord(publicIp).then((certRecord) => {
+        console.log('this is cert record');
+        console.log(certRecord);
+        if (certRecord) {
+            body.certFound = true;
+            body.certExpiration = certRecord.expiresAt;
+            resolve(body);
+        } else {
+            resolve(body);
+        }
+    });
+});
+
+const getDnsRecord = (publicIp) => new Promise((resolve, reject) => {
+    const name = `${getUserHash(publicIp)}.homegames.link`;
+    const params = {
+        HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
+        StartRecordName: name,
+        StartRecordType: 'A'
+    };
+
+    const aws = require('aws-sdk');
+
+    const route53 = new aws.Route53();
+    route53.listResourceRecordSets(params, (err, data) => {
+        console.log('dsfkjhdshfjkdshfkdjs!!!');
+        console.log(params);
+        console.log(err);
+        console.log(data);
+        if (err) {
+            console.error('error listing record sets');
+            console.error(err);
+            reject(err);
+        } else {
+            let found = false;
+            for (const i in data.ResourceRecordSets) {
+                const entry = data.ResourceRecordSets[i];
+                if (entry.Name === name + '.') {
+                    found = true;
+                    resolve(entry.ResourceRecords[0].Value);
+                }
+            }
+            if (!found) {
+                resolve(null);
+            }
+        }
+    });
+
+});
+
+const zipCert = (certData) => new Promise((resolve, reject) => {
+    const archive = archiver('zip', {
+        zlib: { level: 9 } // Sets the compression level.
+    });
+    
+    const bufs = [];
+    archive.on('data', (buf) => {
+        bufs.push(buf);
+    });
+
+    archive.on('end', () => {
+        const totalBuf = Buffer.from(Buffer.concat(bufs));
+        resolve(totalBuf.toString('base64'));
+    });
+
+    archive.append(certData.key, { name: 'hg-certs/homegames.key' });
+
+    archive.finalize();
+
+});
+
+const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
+    if (!CERTS_ENABLED) {
+        reject('Certs not available in this environment');
+    } else {
+        getCertStatus(publicIp).then(certInfo => {
+            if (certInfo.certData && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
+                reject('A valid cert has already been created for this IP (' + publicIp + ').  If you do not have access to your private key, reach out to support@homegames.io to generate a new one');
+            } else {
+                amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        conn.createChannel((err1, channel) => {
+                            if (err1) {
+                                reject(err1);
+                            } else {
+                                console.log('created channel');
+                                channel.assertQueue('homegames-jobs', {
+                                    durable: false
+                                });
+                                acme.crypto.createPrivateKey().then(key => {
+                                    const requestId = generateId();
+                                    acme.crypto.createCsr({
+                                        commonName: getUserHash(publicIp) + '.homegames.link'
+                                    }).then(([certKey, certCsr]) => {
+                                        console.log('ddddd');
+                                        channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })));
+                                        console.log('sent message');
+                                        console.log('this is key');
+                                        console.log(certKey.toString());
+                                        resolve({ key: certKey.toString() });
+                                    });
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    }
+});
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
     const requesterIp = getPublicIp(req);
 
@@ -1865,7 +2467,12 @@ const server = http.createServer((req, res) => {
                         const body = JSON.parse(_body);
                         console.log('update body');
                         console.log(body);
-                        updateProfileInfo(userId, body).then(() => res.end(''));
+                        updateProfileInfo(userId, body).then(() => {
+                            res.writeHead(200, {
+                                'Content-Type': 'application/json'
+                            });
+                            res.end('{}');
+                        });
                     });
                 }
             },
@@ -1874,21 +2481,26 @@ const server = http.createServer((req, res) => {
                     res.end('ok');
                 }
             },
-            [adminRetryRequestRegex]: {
+            [adminAckRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
-                    getCognitoUser(userId).then(userData => {
+                    getUserRecord(userId).then(userData => {
                         if (userData.isAdmin) {
                             getReqBody(req, (_body, err) => {
                                 if (err) {
                                     res.end('error ' + err);
                                 } else {
                                     const body = JSON.parse(_body);
-                                    if (!body.gameId || !body.sourceInfoHash) {
-                                        res.end('requires gameId and sourceInfoHash');
+                                    if (!body.messageId) {
+                                        res.end('requires messageId');
                                     } else {
-                                        retryPublishRequest(body.gameId, body.sourceInfoHash);
-                                        res.end('ok');
+                                        adminAcknowledgeMessage(body.messageId).then(() => {
+                                            res.writeHead(200, {
+                                                'Content-Type': 'application/json'
+                                            });
+
+                                            res.end(JSON.stringify({ success: true }));
+                                        });
                                     }
                                 }
                             });
@@ -1901,16 +2513,18 @@ const server = http.createServer((req, res) => {
                         res.end('failed to get user data');
                     });
                 }
-            },
+            }, 
             [certRequestRegex]: {
-                //               requiresAuth: true,
                 handle: () => {
-                    requestCert(requesterIp).then(() => {
-                        res.end('aite');
-                    }).catch(err => {
-                        console.error('Error ');
-                        console.error(err);
-                        res.end('error');
+                    console.log('need to request a cert');
+                    handleCertRequest(requesterIp).then(response => {
+                        const zippedB64 = zipCert(response);
+                        zipCert(response).then((zippedB64) => {
+                            res.writeHead(200, {
+                                'Content-Type': 'application/octet-stream'
+                            });
+                            res.end(zippedB64);
+                        });
                     });
                 }
             },
@@ -1935,37 +2549,18 @@ const server = http.createServer((req, res) => {
                         console.log(_body);
                         const body = JSON.parse(_body);
 
-                        const bodyText = body.message || 'Empty message';
-
-                        const bodyEmail = body.email || 'No email provided';
-
-                        const emailParams = {
-                            Destination: {
-                                ToAddresses: [
-                                    'support@homegames.io'
-                                ]
-                            },
-                            Message: {
-                                Body: {
-                                    Text: {
-                                        Charset: 'UTF-8',
-                                        Data: `Email: ${bodyEmail}\n\nMessage:${bodyText}`
-                                    }
-                                },
-                                Subject: {
-                                    Charset: 'UTF-8',
-                                    Data: 'New Homegames Support Form Message'
-                                }
-                            },
-                            Source: 'support-form@homegames.io'
-                        };
-
-                        const ses = new aws.SES({region: 'us-west-2'});
-
-                        ses.sendEmail(emailParams, (err, data) => {
-                            res.end(JSON.stringify({
-                                success: !(err)
-                            }));
+                        const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+                        createSupportMessage(body, requesterIp).then(() => {
+                            res.end(JSON.stringify({success: true}));
+                        }).catch(err => {
+                            console.log('this happened');
+                            console.log(err);
+                            if (err?.type == 'TOO_MANY_MESSAGES') {
+                                res.writeHead(400);
+                                res.end('Too many messages from this IP');
+                            } else {
+                                res.end(err?.toString() || 'Error. Contact @homegamesio on twitter for support')
+                            }
                         });
                     });
                 }
@@ -1981,71 +2576,63 @@ const server = http.createServer((req, res) => {
                             console.error(err);
                             res.end('error');
                         } else {
-                            if (!fields.name || !fields.name.length || !fields.description || !fields.description.length) {
+                            if (!fields.name || !fields.name.length || !fields.description || !fields.description.length || !files) {
                                 res.end('creation requires name & description');
                             } else {
                                 const gameId = generateId();
-                                const nowString = '' + Date.now();
-                                const params = {
-                                    RequestItems: {
-                                        [process.env.GAME_TABLE]: [{
-                                            PutRequest: {
-                                                Item: {
-                                                    'game_id': {
-                                                        S: gameId
-                                                    },
-                                                    'created_by': {
-                                                        S: userId 
-                                                    },
-                                                    'name': {
-                                                        S: fields.name[0]
-                                                    },
-                                                    'created_on': {
-                                                        N: nowString
-                                                    },
-                                                    'updated': {
-                                                        N: nowString
-                                                    },
-                                                    'description': {
-                                                        S: fields.description[0] 
-                                                    },
-                                                    //'thumbnail': {
-                                                    //    S: url.replace('https://assets.homegames.io/', '') 
-                                                    //}
-                                                }
-                                            }
-                                        }]
-                                    }
-                                };
+
+                                const fileValues = Object.values(files);
         
-                                const client = new aws.DynamoDB({
-                                    region: 'us-west-2'
-                                });
-                                client.batchWriteItem(params, (err, putResult) => {
-                                    if (!err) {
-                                        res.writeHead(200, {
-                                            'Content-Type': 'application/json'
-                                        });
-                                        res.end(JSON.stringify(mapGame(params.RequestItems[process.env.GAME_TABLE][0].PutRequest.Item)));
+                                let hack = false;
+    
+                                const uploadedFiles = fileValues[0].map(f => {
+    
+                                    if (hack) {
+                                        return;
+                                    }
+    
+                                    hack = true;
+    
+                                    if (f.size > MAX_SIZE) {
+                                        res.writeHead(400);
+                                        res.end('File size exceeds ' + MAX_SIZE + ' bytes');
                                     } else {
-                                        console.log(err);
-                                        res.end('error');
+                                        const assetId = generateId();
+                                        const description = fields?.description?.[0] || '';
+                                        createAssetRecord(userId, assetId, f.size, f.originalFilename, {
+                                            'Content-Type': f.headers['content-type']
+                                        }, `thumbnail for game ${gameId}`).then((asset) => {
+ 
+                                            getMongoCollection('documents').then(documentCollection => {
+                                                documentCollection.insertOne({ developerId: userId, assetId, data: new Binary(fs.readFileSync(f.path)), fileSize: f.size, fileType: f.headers['content-type'] }).then(() => {
+
+                                                    console.log('dsfjkdsfkjhdsfkjhds');
+                                                    console.log(asset);
+                                                    createGame(userId, asset.assetId, fields, files).then(game => {
+                                                       console.log('created game');
+                                                        console.log(game);
+                                                        res.writeHead(200, {
+                                                            'Content-Type': 'application/json'
+                                                        });
+                                                        res.end(JSON.stringify(game));
+                                                    });
+                                                });
+                                            });
+                                        });
                                     }
                                 });
-
-                                if (files.thumbnail?.length) {
-                                    console.log('need to do something with thumbnail');
-
-                                    createGameImagePublishRequest(userId, image, gameId);
-    
-                                    //uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
-                                    //}).catch(err => {
-                                    //    console.log('failed to upload thumbnail');
-                                    //    console.error(err);
-                                    //});
-
-                                }
                             }
+//                                    if (files.thumbnail?.length) {
+//                                        console.log('need to do something with thumbnail');
+
+//                                        createGameImagePublishRequest(userId, image, gameId);
+    
+                                        //uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
+                                        //}).catch(err => {
+                                        //    console.log('failed to upload thumbnail');
+                                        //    console.error(err);
+                                        //});
+//                                    }
                         }
                     });
                 }
@@ -2075,28 +2662,19 @@ const server = http.createServer((req, res) => {
                                     res.end('File size exceeds ' + MAX_SIZE + ' bytes');
                                 } else {
                                     const assetId = getHash(uuidv4());
-    
-                                    createRecord(userId, assetId, f.size, f.originalFilename, {
+                                    const description = fields?.description?.[0] || '';
+                                    createAssetRecord(userId, assetId, f.size, f.originalFilename, {
                                         'Content-Type': f.headers['content-type']
-                                    }).then(() => {
-    
-                                        const childSession = fork(path.join(__dirname, 'upload.js'),
-                                            [
-                                                `--path=${f.path}`,
-                                                `--developer=${userId}`,
-                                                `--id=${assetId}`,
-                                                `--name=${f.originalFilename}`,
-                                                `size=${f.size}`,
-                                                `type=${f.headers['content-type']}`
-                                            ]
-                                        );
-                                        res.writeHead(200, {
-                                            'Content-Type': 'application/json'
+                                    }, description).then(() => {
+                                        uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, f.headers['content-type']).then((assetId) => {
+                                            
+                                            res.writeHead(200, {
+                                                'Content-Type': 'application/json'
+                                            });
+                                            res.end(JSON.stringify({
+                                                assetId
+                                            }));
                                         });
-                                        res.end(JSON.stringify({
-                                            assetId
-                                        }));
-    
                                     });
                                 }
                             });
@@ -2107,147 +2685,41 @@ const server = http.createServer((req, res) => {
             },
             [gamePublishRegex]: {
                 requiresAuth: true,
-                handle: (userId) => {
+                handle: (userId, gameId) => {
                     const form = new multiparty.Form();
-    
-                    getReqBody(req, (_data) => {
-                        const data = JSON.parse(_data);
-                        const _gamePublishRegex = new RegExp('/games/(\\S*)/publish');
-                        const gameId = _gamePublishRegex.exec(req.url)[1];
-                        console.log("here is data");
-                        console.log(data);
-    
-                        const publishData = {
-                            commit: data.commit,
-                            requester: userId,
-                            owner: data.owner,
-                            repo: data.repo,
-                            //squishVersion: data.squishVersion,
-                            gameId
-                        };
+                    form.parse(req, (err, fields, files) => {
+                        console.log('cool heres form');
+                        console.log(fields);
+                        console.log(files);
 
-                        console.log('publish data');
-                        console.log(publishData);
-    
-                        const buildSourceInfoHash = ({sourceType, commit, owner, repo}) => {
-                            const stringConcat = `${sourceType}${commit}${owner}${repo}`;
-                            return crypto.createHash('md5').update(stringConcat).digest('hex');
-                        };
-    
-                        const verifyNoExistingPublishRequest = ({commit, owner, repo, gameId, requester}) => new Promise((resolve, reject) => {
-    
-                            const sourceInfoHash = buildSourceInfoHash({sourceType: SourceType.GITHUB, commit, owner, repo});
-    
-                            const readClient = new aws.DynamoDB.DocumentClient({
-                                region: 'us-west-2'
-                            });
-    
-                            const readParams = {
-                                TableName: 'publish_requests',
-                                Key: {
-                                    'game_id': gameId,
-                                    'source_info_hash': sourceInfoHash
-                                }
-                            };
-    
-                            readClient.get(readParams, (err, data) => {
-                                // todo: handle error separately
-                                if (err || data.Item) {
-                                    reject();
-                                } else {
-                                    resolve();
-                                }
-                            });
-                        });
-    
-                        const createPublishRequest = ({commit, owner, repo, gameId, requester }) => new Promise((resolve, reject) => {
-                
-                            const sourceInfoHash = buildSourceInfoHash({sourceType: SourceType.GITHUB, commit, owner, repo});
-    
-                            const client = new aws.DynamoDB({
-                                region: 'us-west-2'
-                            });
-    
-                            const requestId = `${gameId}:${sourceInfoHash}`;
-    
-                            const params = {
-                                TableName: 'publish_requests',
-                                Item: {
-                                    'request_id': {
-                                        S: requestId
-                                    },
-                                    'commit_hash': {
-                                        S: commit
-                                    },
-                                    'repo_owner': {
-                                        S: owner
-                                    },
-                                    'repo_name': {
-                                        S: repo
-                                    },
-                                    'game_id': {
-                                        S: gameId
-                                    },
-                                    'requester': {
-                                        S: requester
-                                    }, 
-                                    'source_info_hash': {
-                                        S: sourceInfoHash
-                                    },
-                                    'created': {
-                                        N: `${Date.now()}`
-                                    },
-                                    'status': {
-                                        S: 'SUBMITTED'
-                                    },
-//                                    'squishVersion': {
-//                                        S: squishVersion
-//                                    }
-                                }
-                            };
-
-                            console.log("HERE IS PAREAMS!");
-                            console.log(params);
-                
-                            client.putItem(params, (err, putResult) => {
-                                if (!err) {
-                                    resolve({sourceInfoHash, gameId});
-                                } else {
-                                    console.error('error creating publish request');
-                                    console.error(err);
-                                    reject(err);
-                                }
-                            });
-                        });
-    
-                        verifyNoExistingPublishRequest(publishData).then(() => {
-                            createPublishRequest(publishData).then((publishRecord) => {
-                                const messageBody = JSON.stringify(publishRecord);
-    
-                                const sqsParams = {
-                                    MessageBody: messageBody,
-                                    QueueUrl: process.env.SQS_QUEUE_URL,
-                                    MessageGroupId: Date.now() + '',
-                                    MessageDeduplicationId: publishRecord.sourceInfoHash
-                                };
-    
-                                const sqs = new aws.SQS({region: 'us-west-2'});
-    
-                                sqs.sendMessage(sqsParams, (err, sqsResponse) => {
-                                    console.log(err);
-                                    console.log(sqsResponse);
-                                    res.end('created publish request');
-                                });
-                            }).catch((err) => {
-                                console.error('sqs error');
-                                console.error(err);
-                                res.writeHead(500);
-                                res.end('Failed to create publish request');
-                            });
-                        }).catch(() => {
+                        const { gameId, type } = fields;
+                        console.log('fjjfjffj');
+                        console.log(gameId);
+                        if (!gameId || !gameId.length || !type || !type.length) {
                             res.writeHead(400);
-                            res.end('Publish request already exists');
-                        });
+                            res.end('gameId & type are required');
+                        } else {
+                            if (type[0] == 'zip') {
+                                if (!files || files.length < 1) {
+                                    res.writeHead(400);
+                                    res.end('missing file');
+                                }
+                            } else if (type[0] == 'github') {
+                                const { commit, repo, owner } = fields;
+                                downloadFromGithub(owner, repo, commit).then(zip => {
+                                    submitPublishRequest(userId, gameId[0], fields, {file: [zip.zipPath]}).then(publishRequest => {
+                                        res.writeHead(200, {
+                                            'Content-Type': 'application/json'
+                                        });
+                                        res.end(JSON.stringify(publishRequest));
+
+                                    });
+                                });
+                            } else {
+                                res.writeHead(400);
+                                res.end('Unknown type');
+                            }
+                        }
                     });
                 }
 
@@ -2257,35 +2729,24 @@ const server = http.createServer((req, res) => {
                 handle: (userId, gameId) => {
                     getReqBody(req, (_data) => {
                         const data = JSON.parse(_data);
-                        console.log('thjis is data');
- 
                         const changed = data.description || data.thumbnail;
     
                         if (changed) {
                             getGame(gameId).then(game => {
-                                console.log('got game!');
-                                console.log(game);
-                                if (userId != game.createdBy) {
+                                if (userId != game.developerId) {
                                     res.writeHead(400, {
                                         'Content-Type': 'text/plain'
                                     });
                                     res.end('You cannot modify a game that you didnt create');
                                 } else {
-                                    console.log("FDDSFSDF");
                                     if (data.description != game.description) {
-                                        console.log("FSDFSDFDSFDSFDSFDSF");
                                         updateGame(gameId, {description: data.description}).then((_game) => {
-                                            console.log('dsfjksdfhjkdsf');
-                                            // sigh. 
-                                            setTimeout(() => {
-                                                res.writeHead(200, {
-                                                    'Content-Type': 'application/json'
-                                                });
-                                                res.end(JSON.stringify(_game));
-                                            }, 250);
+                                            res.end(JSON.stringify(_game));
                                         });
                                     } else {
-                                        res.end('hmmm');
+                                        getGame(gameId).then((_game) => {
+                                            res.end(JSON.stringify(_game));
+                                        });
                                     }
                                 }
 
@@ -2383,7 +2844,7 @@ const server = http.createServer((req, res) => {
 
                         const { requestId } = data;
                         getPublishRequest(requestId).then(requestData => {
-                            updatePublishRequestState(requestData.game_id, requestData.source_info_hash, 'PENDING_PUBLISH_APPROVAL').then(() => {
+                            updatePublishRequestState(requestId, requestData.game_id, requestData.source_info_hash, 'PENDING_PUBLISH_APPROVAL').then(() => {
                                 res.end('ok');
                             }).catch(err => {
                                 res.end(err.toString());
@@ -2394,12 +2855,80 @@ const server = http.createServer((req, res) => {
                     });
                 }
             },
+            [createBlogRegex]: {
+                requiresAuth: true,
+                handle: (userId, a, b) => {
+                    getUserRecord(userId).then(userData => {
+                        if (!userData.isAdmin) {
+                            res.writeHead(401);
+                            res.end('Not an admin');
+                        } else {
+                            getReqBody(req, (_data) => {
+                                createBlogPost(userId, JSON.parse(_data)).then(() => {
+                                    res.writeHead(200, {
+                                        'Content-Type': 'application/json'
+                                    });
+                                    res.end(_data);
+                                });
+                            });
+                        }
+                    });
+                }
+            },
+            [signupRegex]: {
+                handle: () => {
+                    getReqBody(req, (_data) => {
+                        let signupBody = {};
+                        let err = false;
+                        try {
+                            signupBody = JSON.parse(_data);
+                        } catch (err) {
+                            res.writeHead(400);
+                            res.end(JSON.stringify({error: 'invalid request json' }));
+                            err = true;
+                        }
+
+                        if (!err) {
+                            signup(signupBody).then((token) => {
+                                res.end(JSON.stringify({ token }));
+                            }).catch(signupError => {
+                                res.writeHead(500);
+                                res.end(JSON.stringify({ error: signupError}));
+                            });
+                        }
+                    });
+                }
+            },
+            [loginRegex]: {
+                handle: () => {
+                    getReqBody(req, (_data) => {
+                        let loginBody = {};
+                        let err = false;
+                        try {
+                            loginBody = JSON.parse(_data);
+                        } catch (err) {
+                            res.writeHead(400);
+                            res.end(JSON.stringify({error: 'invalid request json'}));
+                            err = true;
+                        }
+
+                        if (!err) {
+                            console.log('want to login and generate token for user');
+                            login(loginBody).then(tokenPayload => {
+                                res.writeHead(200, {
+                                    'Content-Type': 'application/json'
+                                });
+                                res.end(JSON.stringify(tokenPayload));
+                            });
+                        }
+
+                    });
+                }
+            },
             [requestActionRegex]: {
                 requiresAuth: true,
                 handle: (userId, requestId) => {
-                    getCognitoUser(userId).then(userData => {
-                        const _requestActionRegex = new RegExp('/admin/request/(\\S*)/action');
-                        const requestId = _requestActionRegex.exec(req.url)[1];
+                    getUserRecord(userId).then(userData => {
                         if (userData.isAdmin) {
                             getReqBody(req, (_data) => {
                                 const reqBody = JSON.parse(_data);
@@ -2407,7 +2936,8 @@ const server = http.createServer((req, res) => {
                                     adminPublishRequestAction(requestId, reqBody.action, reqBody.message).then((gameId) => {
 
                                         if (reqBody.action === 'approve') {
-                                            updateGame(gameId, {published_state: 'APPROVED'});
+                                            updateGameIndex(gameId).then(() => {
+                                            });
                                         }
                                         res.end('approved!');
                                     }).catch(err => {
@@ -2432,6 +2962,79 @@ const server = http.createServer((req, res) => {
             }
         },
         'GET': {
+            [certStatusRegex]: {
+                handle: () => {
+                    getCertStatus(requesterIp).then((certStatus) => {
+                        console.log('cert status');
+                        console.log(certStatus);
+                        const body = certStatus;
+                        getDnsRecord(requesterIp).then((dnsRecord) => {   
+                            console.log('this is the dns record');
+                            console.log(dnsRecord);
+                            res.writeHead(200, {
+                                'Content-Type': 'application/json'
+                            }); 
+                            body.dnsAlias = dnsRecord;
+                            res.end(JSON.stringify(body));
+                        });
+                    });
+                }
+            },
+            [assetsRegex]: {
+                handle: (assetId) => {
+                    getMongoAsset(assetId).then((assetData) => {
+                        if (!assetData) {
+                            res.writeHead(404);
+                            res.end('Asset not found');
+                        } else {
+                            getMongoDocument(assetId).then((documentData) => {
+                                if (documentData) {
+                                    res.writeHead(200, {
+                                        'Content-Disposition': `inline; filename=${assetData.name}`,
+                                    });
+                                    res.end(documentData.data.buffer);
+                                } else {
+                                    res.writeHead(404);
+                                    res.end();
+                                }
+                            });
+                        }
+                    });
+                }
+            },
+            [blogRegex]: {
+                handle: () => {
+                    const queryObject = url.parse(req.url, true).query;
+                    const { limit, offset, sort, query, includeMostRecent } = queryObject;
+ 
+                    listBlogPosts(limit || 1, offset || 0, sort || '', query || '', includeMostRecent === 'true').then((blogPosts) => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+                        res.end(JSON.stringify(blogPosts));
+                    });
+                }
+            },
+            [blogDetailRegex]: {
+                handle: (blogId) => {
+                    getBlogPost(blogId).then((blogPost) => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+                        res.end(JSON.stringify(blogPost));
+                    }).catch(err => {
+                        res.writeHead(500);
+                        res.end(JSON.stringify({error: err}));
+                    });
+                }
+            },
+
+            [githubLinkRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    res.end('ayo');
+                }
+            },
             [podcastRegex]: {
                 handle: () => {
                     const queryObject = url.parse(req.url, true).query;
@@ -2480,41 +3083,55 @@ const server = http.createServer((req, res) => {
  
                 }
             },
+            [listMyGamesRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    const queryObject = url.parse(req.url, true).query;
+                    let { query, offset, limit } = queryObject;
+                    if (!offset) {
+                        offset = 0;
+                    }
+                    if (!limit) {
+                        limit = 10;
+                    }
+                    listMyGames(userId, limit, offset, query).then(results => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+                        res.end(JSON.stringify(
+                            results
+                        )); 
+                    });
+                }
+            }, 
             [listGamesRegex]: {
                 handle: () => {
                     const queryObject = url.parse(req.url, true).query;
-                    const { query, author, page, limit } = queryObject;
+                    let { query, author, offset, limit } = queryObject;
+                    if (!offset) {
+                        offset = 0;
+                    }
+                    if (!limit) {
+                        limit = 10;
+                    }
                     if (author) {
-                        listGamesForAuthor({ author, page, limit }).then((data) => {
+                        listPublicGamesForAuthor({ author, offset, limit }).then((data) => {
                             res.writeHead(200, {
                                 'Content-Type': 'application/json'
                             });
-                            res.end(JSON.stringify({
-                                games: data
-                            }));
+                            res.end(JSON.stringify(data));
+
                         }).catch(err => {
                             console.log('unable to list games for author');
                             console.log(err);
                             res.end('error');
                         });
-                    } else if (query) {
-                        queryGames(query).then(data => {
-                            res.writeHead(200, {
-                                'Content-Type': 'application/json'
-                            });
-                            res.end(JSON.stringify({
-                                games: data
-                            })); 
-                        });
                     } else {
-                        listGames().then(pages=> {
+                        listGames(limit, offset, null, query).then(results => {
                             res.writeHead(200, {
                                 'Content-Type': 'application/json'
                             });
-                            res.end(JSON.stringify({
-                                games: pages[page || 1],
-                                pageCount: Object.keys(pages).length
-                            })); 
+                            res.end(JSON.stringify(results));
                         });
                     }
                 }
@@ -2535,7 +3152,11 @@ const server = http.createServer((req, res) => {
             [ipRegex]: {
                 handle: () => {
                     const { headers } = req;
-                    const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    const requesterIp = "::1";//headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    console.log(req.connection.remoteAddress);
+                    console.log('requester ip');
+                    console.log(requesterIp);
+                    console.log(headers);
                     res.end(requesterIp);
                 }
             },
@@ -2633,7 +3254,7 @@ const server = http.createServer((req, res) => {
                     verifyPublishRequest(code, requestId).then((publishRequest) => {
                         publishGameVersion(publishRequest).then(() => {
                             emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
-                                updatePublishRequestState(publishRequest.game_id, publishRequest.source_info_hash, 'CONFIRMED').then(() => {
+                                updatePublishRequestState(requestId, publishRequest.game_id, publishRequest.source_info_hash, 'CONFIRMED').then(() => {
                                     res.end('verified!');
                                 });
                             });
@@ -2646,13 +3267,23 @@ const server = http.createServer((req, res) => {
             [assetsListRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
-                    listAssets(userId).then(assets => {
+                    const queryObject = url.parse(req.url, true).query;
+                    let { limit, offset, sort, query } = queryObject; 
+                    if (!offset) {
+                        offset = 0;
+                    }
+                    if (!limit || limit > 100) {
+                        limit = 10;
+                    }
+                    listAssets(userId, query, limit, offset).then(_assets => {
+                        const { assets, count } = _assets;
                         res.writeHead(200, {
                             'Content-Type': 'application/json'
                         });
 
                         res.end(JSON.stringify({
-                            assets
+                            assets: assets.map(assetResponse),
+                            count
                         }));
                     }).catch((err) => {
                         console.log(err);
@@ -2667,22 +3298,55 @@ const server = http.createServer((req, res) => {
             },
             [profileRegex]: {
                 handle: (userId) => {
-                    getProfileInfo(userId).then(data => res.end(JSON.stringify(data)));
+                    getProfileInfo(userId).then(data => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
+                        res.end(JSON.stringify(data));
+                    });
                 },
                 requiresAuth: true
             },
             [publishRequestsRegex]: {
                 handle: (userId, gameId) => {
                     listPublishRequests(gameId).then((publishRequests) => {
+                        res.writeHead(200, {
+                            'Content-Type': 'application/json'
+                        });
                         res.end(JSON.stringify(publishRequests));
                     });
                 },
                 requiresAuth: true  
             },
+            [adminListSupportMessagesRegex]: {
+                requiresAuth: true,
+                handle: (userId) => {
+                    getUserRecord(userId).then(userData => {
+                        if (userData.isAdmin) {
+                            const queryObject = url.parse(req.url, true).query;
+                            let { page, limit } = queryObject;
+                            adminListSupportMessages(page, limit).then(supportMessages => {
+                                res.end(JSON.stringify(supportMessages));
+                            }).catch(err => {
+                                console.log('failed to list publish requests');
+                                console.error(err);
+                                res.end('failed to list requests');
+                            });
+                        } else {
+                            console.log('user attempted to call admin API: ' + userId);
+                            res.end('user is not an admin');
+                        }
+                    }).catch(err => {
+                        console.log(err);
+                        res.end('failed to get user data');
+                    });
+                }
+
+            },
             [adminListPendingPublishRequestsRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
-                    getCognitoUser(userId).then(userData => {
+                    getUserRecord(userId).then(userData => {
                         if (userData.isAdmin) {
                             adminListPendingPublishRequests().then(publishRequests => {
                                 res.end(JSON.stringify(publishRequests));
@@ -2704,7 +3368,7 @@ const server = http.createServer((req, res) => {
             [adminListFailedPublishRequestsRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
-                    getCognitoUser(userId).then(userData => {
+                    getUserRecord(userId).then(userData => {
                         if (userData.isAdmin) {
                             adminListFailedPublishRequests().then(publishRequests => {
                                 res.end(JSON.stringify(publishRequests));
@@ -2731,12 +3395,14 @@ const server = http.createServer((req, res) => {
         }
     };
     if (req.method === 'OPTIONS') {
-        res.end('ok');
+        console.log('dsfsdf');
+        res.writeHead(200);
+        res.end();
     } else if (!requestHandlers[req.method]) {
         res.writeHead(400);
         res.end('Unsupported method: ' + req.method);
     } else {
-
+        console.log('asduoa ' +req.method + " - "  + req.url);
         // sort with largest values upfront to get the most specific match
         const matchers = Object.keys(requestHandlers[req.method]).sort((a, b) => b.length - a.length);
         let matched = null;
@@ -2748,15 +3414,15 @@ const server = http.createServer((req, res) => {
                     matchedParams.push(matched[j]);
                 }
                 const handlerInfo = requestHandlers[req.method][matchers[i]];
+
                 if (handlerInfo.requiresAuth) {
-                    const username = req.headers['hg-username'];
-                    const token = req.headers['hg-token'];
+                    const authHeader = req.headers.authorization;
     
-                    if (!username || !token) {
-                        res.end('API requires username & auth token');
+                    if (!authHeader) {
+                        res.end('API requires authorization');
                     } else {
-                        verifyAccessToken(username, token).then(() => {
-                            handlerInfo.handle(username, ...matchedParams);
+                        verifyToken(authHeader).then((userInfo) => {
+                            handlerInfo.handle(userInfo.userId, ...matchedParams);
                         }).catch(err => {
                             console.error(err);
                             res.end('Unexpected error occured');
@@ -2807,7 +3473,7 @@ wss.on('connection', (ws, req) => {
                 registerHost(publicIp, message.data, ws.id).then(logSuccess('registerHost')).catch(logFailure('registerHost'));
             } else if (message.type === 'verify-dns') {
                 console.log('verifying dns for user ' + message.username);
-                verifyAccessToken(message.username, message.accessToken).then(() => {
+                verifyToken(message.username, message.accessToken).then(() => {
                     const ipSub = message.localIp.replace(/\./g, '-');
                     const userHash = getUserHash(message.username);
                     const userUrl = `${ipSub}.${userHash}.homegames.link`;
@@ -2851,4 +3517,4 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-server.listen(80);
+server.listen(process.env.PORT || 80);
