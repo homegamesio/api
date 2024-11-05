@@ -23,6 +23,8 @@ const amqp = require('amqplib/callback_api');
 
 const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
+const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
+
 const SourceType = {
     GITHUB: 'GITHUB'
 };
@@ -31,7 +33,7 @@ const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
 };
 
-const CERTS_ENABLED = true;//process.env.CERTS_ENABLED;
+const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
 const DB_TYPE = process.env.DB_TYPE || 'local';
 
@@ -54,6 +56,7 @@ const DB_HOST = process.env.DB_HOST;
 const DB_PORT = process.env.DB_PORT;
 const DB_USERNAME = process.env.DB_USERNAME || '';
 const DB_PASSWORD = process.env.DB_PASSWORD || '';
+const DB_NAME = process.env.DB_NAME || 'homegames';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hello world!';
 
@@ -150,7 +153,7 @@ const downloadFromGithub = (owner, repo, commit = '') =>
   });
 
 const getMongoClient = () => {
-    const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/homegames` : `mongodb://${DB_HOST}:${DB_PORT}/homegames`;
+    const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
     console.log("URI");
     console.log(uri);
     const params = {};
@@ -168,7 +171,7 @@ const getMongoClient = () => {
 const getMongoAsset = (assetId) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const assetCollection = db.collection('assets');
         assetCollection.findOne({ assetId }).then(resolve).catch(reject);
     });
@@ -196,7 +199,7 @@ const createSupportMessage = (body, sourceIp) => new Promise((resolve, reject) =
 const createBlogPost = (userId, blogPayload) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const blogCollection = db.collection('blog');
         blogCollection.insertOne({ id: generateId(), publishedBy: userId, created: Date.now(), title: blogPayload.title || '', content: blogPayload.content }).then(resolve).catch(reject);
     });
@@ -251,7 +254,7 @@ const listBlogPosts = (limit, offset, sort, query, includeMostRecent) => new Pro
 const getMongoDocument = (assetId) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const documentCollection = db.collection('documents');
         documentCollection.findOne({ assetId }).then(resolve).catch(reject);
     });
@@ -268,7 +271,7 @@ const login = (request) => new Promise((resolve, reject) => {
 
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const collection = db.collection('users');
         collection.findOne({ userId: username }).then((usernameResponse) => {
             if (usernameResponse == null) {
@@ -322,7 +325,7 @@ const generateJwt = (userId) => {
 const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const collection = db.collection('users');
         collection.findOne({ userId }).then((userResponse) => {
             if (userResponse == null) {
@@ -555,59 +558,6 @@ const challengeRemoveFn = async(authz, challenge, keyAuthorization) => {
     }
 };
 
-const storeRecord = (record) => {
-	if (record.length > 1000) {
-		console.log("Truncating record of length " + record.length);
-		record = record.substring(1000);
-	}
-
-	const errString = `[${Date.now()}] ${record.toString()}\n`;
-	const buf = Buffer.from(errString, 'utf-8');
-
-	const fileSize = buf.length;
-	const fileSizeMb = fileSize / (1024 * 1024);
-
-	if (fileSizeMb < 1) {
-            console.log('writing log file. size in mb: ' + fileSizeMb);
-
-	    const s3 = new aws.S3();
-	    const params = { Bucket: 'homegames', Key: 'error-logs/' + Date.now(), Body: buf };
-	    s3.upload(params, {}, (err, data) => {
-		console.log('s3 response');
-		console.log(err);
-		console.log(data);
-	    });
-       } else {
-            console.error("Ignoring bug report larger than 1mb");
-            console.error(record);
-       }
-}
-
-// Redis key structure
-//{
-//  "publicIp": {
-//    "serverId1": {
-//      ...
-//    },
-//    "serverId2": {
-//  ...
-//    },
-//    ...
-//  }
-//}
-const getHomegamesServers = (publicIp) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-
-        client.hgetall(publicIp, (err, data) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(data);
-            }
-        });
-    });
-});
-
 const deleteHostInfo = (publicIp, localIp) => new Promise((resolve, reject) => {
     redisClient().then(client => {
 
@@ -674,7 +624,7 @@ const generateSocketId = () => {
 const uploadMongo = (developerId, assetId, filePath, fileName, fileSize, fileType) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const collection = db.collection('assets');
         collection.findOne({ assetId }).then(asset => {
             console.log("found asset to upload");
@@ -868,7 +818,7 @@ const getProfileInfo = (userId) => new Promise((resolve, reject) => {
 const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const collection = db.collection('users');
         console.log('for ' + userId);
         collection.findOne({ userId }).then((userResponse) => {
@@ -962,11 +912,11 @@ const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((
                     reject(err1);
                 } else {
                     console.log('created channel');
-                    channel.assertQueue('homegames-jobs', {
+                    channel.assertQueue(JOB_QUEUE_NAME, {
                         durable: true
                     });
 
-                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })), { persistent: true });
+                    channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })), { persistent: true });
                     console.log('sent message');
                     resolve();
                 }
@@ -1005,7 +955,7 @@ const updateProfileInfo = (userId, { description, image }) => new Promise((resol
 const getMongoCollection = (collectionName) => new Promise((resolve, reject) => {
     const client = getMongoClient();
     client.connect().then(() => {
-        const db = client.db('homegames');
+        const db = client.db(DB_NAME);
         const collection = db.collection(collectionName);
         resolve(collection);
     });
@@ -1026,11 +976,11 @@ const createProfileImageTask = (userId, assetId) => new Promise((resolve, reject
                     reject(err1);
                 } else {
                     console.log('created channel');
-                    channel.assertQueue('homegames-jobs', {
+                    channel.assertQueue(JOB_QUEUE_NAME, {
                         durable: true 
                     });
 
-                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PROFILE_IMAGE_APPROVAL_REQUEST', userId, assetId })), { persistent: true });
+                    channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'PROFILE_IMAGE_APPROVAL_REQUEST', userId, assetId })), { persistent: true });
                     console.log('sent message');
                     resolve();
                 }
@@ -2247,7 +2197,7 @@ const publishRequestMessage = (userId, gameId, assetId, requestId) => new Promis
                 durable: true
             });
 
-            channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PUBLISH_REQUEST', userId, gameId, assetId, requestId })), { persistent: true } );
+            channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'PUBLISH_REQUEST', userId, gameId, assetId, requestId })), { persistent: true } );
             console.log('sent message');
             resolve();
         });
@@ -2395,7 +2345,7 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
     } else {
         getCertStatus(publicIp).then(certInfo => {
             if (certInfo.certData && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
-                reject('A valid cert has already been created for this IP (' + publicIp + ').  If you do not have access to your private key, reach out to support@homegames.io to generate a new one');
+                reject('A valid cert has already been created for this IP (' + publicIp + ').  If you do not have access to your private key, contact us to generate a new one');
             } else {
                 amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
                     if (err) {
@@ -2406,7 +2356,7 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                                 reject(err1);
                             } else {
                                 console.log('created channel');
-                                channel.assertQueue('homegames-jobs', {
+                                channel.assertQueue(JOB_QUEUE_NAME, {
                                     durable: true
                                 });
                                 acme.crypto.createPrivateKey().then(key => {
@@ -2420,7 +2370,7 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                                     }).then(([certKey, certCsr]) => {
                                         console.log('ddddd hererere');
 					console.log(`${getUserHash(publicIp)}.${CERT_DOMAIN}`);
-                                        channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
+                                        channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
                                         console.log('sent message');
                                         console.log('this is key');
                                         console.log(certKey.toString());
@@ -2519,7 +2469,7 @@ const server = http.createServer((req, res) => {
                             res.end('error: ' + err);
                         } else {
                             console.log(`${Date.now()} Got bug report: `);
-                            storeRecord(_body);
+                            console.log(_body);
                             res.end('ok');
                         }
                     });
@@ -3148,68 +3098,6 @@ const server = http.createServer((req, res) => {
                     console.log(requesterIp);
                     console.log(headers);
                     res.end(requesterIp);
-                }
-            },
-            [linkRegex]: {
-                handle: () => {
-                    const { headers } = req;
-
-                    const noServers = () => {
-                        res.writeHead(200, {
-                            'Content-Type': 'text/plain'
-                        });
-                        res.end('No Homegames servers found. Contact support@homegames.io for help');
-                    };
-
-                    if (!headers) {
-                        noServers();
-                    } else {
-                        res.writeHead(200, {
-                            'Content-Type': 'text/plain'
-                        });
-
-                        const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
-
-                        getHomegamesServers(requesterIp).then(servers => {
-                            const serverIds = servers && Object.keys(servers) || [];
-                            if (serverIds.length === 1) {
-                                const serverInfo = JSON.parse(servers[serverIds[0]]);
-                                const hasHttps = serverInfo.https;
-                                const prefix = hasHttps ? 'https' : 'http';
-                                const urlOrIp = serverInfo.verifiedUrl || serverInfo.localIp;
-                                res.writeHead(307, {
-                                    'Location': `${prefix}://${urlOrIp}`,
-                                    'Cache-Control': 'no-store'
-                                });
-                                res.end();
-                            } else if (serverIds.length > 1) {
-                                const serverOptions = serverIds.map(serverId => {
-                                    const serverInfo = JSON.parse(servers[serverId]);
-
-                                    const prefix = serverInfo.https ? 'https': 'http';
-                                    const urlOrIp = serverInfo.verifiedUrl || serverInfo.localIp;
-                                    const lastHeartbeat = new Date(Number(serverInfo.timestamp));
-                                    return `<li><a href="${prefix}://${urlOrIp}"}>Server ID: ${serverId} (Last heartbeat: ${lastHeartbeat})</a></li>`;
-                                });
-
-                                const content = `Homegames server selector: <ul>${serverOptions.join('')}</ul>`;
-                                const response = `<html><body>${content}</body></html>`;
-                                res.writeHead(200, {
-                                    'Content-Type': 'text/html'
-                                });
-                                res.end(response);
-                            } else {
-                                console.log('no servers');
-                                noServers();
-                            }
-
-                        }).catch(err => {
-                            console.log('Error getting host info');
-                            console.log(err);
-                            noServers();
-                        });
-                    }
-                    res.end('ayy lmao');
                 }
             },
             [gameVersionDetailRegex]: {
