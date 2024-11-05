@@ -21,6 +21,8 @@ const { v4: uuidv4 } = require('uuid');
 const { Binary, MongoClient } = require('mongodb');
 const amqp = require('amqplib/callback_api');
 
+const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
+
 const SourceType = {
     GITHUB: 'GITHUB'
 };
@@ -948,7 +950,10 @@ const createGame = (developerId, thumbnailAssetId, fields, files) => new Promise
 });
 
 const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((resolve, reject) => {
+	console.log('connecting to thing!');
     amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+	    	console.log('cocnocncnetc!');
+	    console.log(err);
         if (err) {
             reject(err);
         } else {
@@ -958,10 +963,10 @@ const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((
                 } else {
                     console.log('created channel');
                     channel.assertQueue('homegames-jobs', {
-                        durable: false
+                        durable: true
                     });
 
-                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })));
+                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })), { persistent: true });
                     console.log('sent message');
                     resolve();
                 }
@@ -1022,10 +1027,10 @@ const createProfileImageTask = (userId, assetId) => new Promise((resolve, reject
                 } else {
                     console.log('created channel');
                     channel.assertQueue('homegames-jobs', {
-                        durable: false
+                        durable: true 
                     });
 
-                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PROFILE_IMAGE_APPROVAL_REQUEST', userId, assetId })));
+                    channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PROFILE_IMAGE_APPROVAL_REQUEST', userId, assetId })), { persistent: true });
                     console.log('sent message');
                     resolve();
                 }
@@ -1416,12 +1421,7 @@ const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((
 });
 
 const createAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
-    if (DB_TYPE == 'mongo') {
-        console.log('creating asset with id ' + assetId);
-        createMongoAssetRecord(developerId, assetId, size, name, metadata, description).then(resolve).catch(reject);
-    } else if (DB_TYPE == 'dynamo') {
-        createRecord(developerId, assetId, size, name, metadata).then(resolve).catch(reject);
-    }
+   createMongoAssetRecord(developerId, assetId, size, name, metadata, description).then(resolve).catch(reject);
 });
 
 const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
@@ -1863,6 +1863,8 @@ const getIndexData = (indexes, limit, offset) => new Promise((resolve, reject) =
         from: offset,
         size: limit
     });
+
+	console.log('hfhfhfhf huh ' + ELASTICSEARCH_HOST + ' ::::: ' + ELASTICSEARCH_PORT);
     
     const options = {
         hostname: ELASTICSEARCH_HOST,
@@ -2242,10 +2244,10 @@ const publishRequestMessage = (userId, gameId, assetId, requestId) => new Promis
         conn.createChannel((err1, channel) => {
             console.log('created channel');
             channel.assertQueue('publish_requests', {
-                durable: false
+                durable: true
             });
 
-            channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PUBLISH_REQUEST', userId, gameId, assetId, requestId })));
+            channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'PUBLISH_REQUEST', userId, gameId, assetId, requestId })), { persistent: true } );
             console.log('sent message');
             resolve();
         });
@@ -2291,30 +2293,6 @@ const submitPublishRequest = (userId, gameId, fields, files) => new Promise((res
     }
 });
 
-const requestCert = (publicIp) => new Promise((resolve, reject) => {
-    console.log('need to do the thing');
-    acme.crypto.createPrivateKey().then(key => {
-        const client = new acme.Client({
-            directoryUrl: acme.directory.letsencrypt.staging,//production,//.staging
-            accountKey: key
-        });
-
-        acme.crypto.createCsr({
-            commonName: `${getHash(publicIp)}.homegames.link`//,
-            //          altNames: ['picodeg.io']
-        }).then((certKey, certCsr) => {
-            console.log('did this');
-            console.log(certKey);
-            console.log(certCsr);
-            resolve();
-        }).catch(err => {
-            console.error('error creating csr');
-            console.error(err);
-            reject(err);
-        });
-    });
-});
-
 const getPublicIp = (req) => {
     const connection = req && req.connection;
     const socket = req && req.socket;
@@ -2345,6 +2323,7 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
         if (certRecord) {
             body.certFound = true;
             body.certExpiration = certRecord.expiresAt;
+	    body.cert = certRecord.cert;
             resolve(body);
         } else {
             resolve(body);
@@ -2353,7 +2332,7 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
 });
 
 const getDnsRecord = (publicIp) => new Promise((resolve, reject) => {
-    const name = `${getUserHash(publicIp)}.homegames.link`;
+    const name = `${getUserHash(publicIp)}.${CERT_DOMAIN}`;
     const params = {
         HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
         StartRecordName: name,
@@ -2404,7 +2383,7 @@ const zipCert = (certData) => new Promise((resolve, reject) => {
         resolve(totalBuf.toString('base64'));
     });
 
-    archive.append(certData.key, { name: 'hg-certs/homegames.key' });
+    archive.append(certData.key, { name: 'homegames.key' });
 
     archive.finalize();
 
@@ -2428,15 +2407,20 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                             } else {
                                 console.log('created channel');
                                 channel.assertQueue('homegames-jobs', {
-                                    durable: false
+                                    durable: true
                                 });
                                 acme.crypto.createPrivateKey().then(key => {
+				    console.log('cool did that');
+				    console.log(key);
+				    console.log('this is name for cert i am generating');
+				    console.log(`${getUserHash(publicIp)}.${CERT_DOMAIN}`);
                                     const requestId = generateId();
                                     acme.crypto.createCsr({
-                                        commonName: getUserHash(publicIp) + '.homegames.link'
+                                        commonName: `${getUserHash(publicIp)}.${CERT_DOMAIN}`
                                     }).then(([certKey, certCsr]) => {
-                                        console.log('ddddd');
-                                        channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })));
+                                        console.log('ddddd hererere');
+					console.log(`${getUserHash(publicIp)}.${CERT_DOMAIN}`);
+                                        channel.sendToQueue('homegames-jobs', Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
                                         console.log('sent message');
                                         console.log('this is key');
                                         console.log(certKey.toString());
@@ -2455,8 +2439,6 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-
-    const requesterIp = getPublicIp(req);
 
     const requestHandlers = {
         'POST': {
@@ -2517,6 +2499,7 @@ const server = http.createServer((req, res) => {
             [certRequestRegex]: {
                 handle: () => {
                     console.log('need to request a cert');
+                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
                     handleCertRequest(requesterIp).then(response => {
                         const zippedB64 = zipCert(response);
                         zipCert(response).then((zippedB64) => {
@@ -2581,6 +2564,8 @@ const server = http.createServer((req, res) => {
                             } else {
                                 const gameId = generateId();
 
+				console.log("FIFIFIFI");
+				    console.log(files);
                                 const fileValues = Object.values(files);
         
                                 let hack = false;
@@ -2964,6 +2949,9 @@ const server = http.createServer((req, res) => {
         'GET': {
             [certStatusRegex]: {
                 handle: () => {
+			console.log('fuk');
+
+                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
                     getCertStatus(requesterIp).then((certStatus) => {
                         console.log('cert status');
                         console.log(certStatus);
@@ -2975,6 +2963,8 @@ const server = http.createServer((req, res) => {
                                 'Content-Type': 'application/json'
                             }); 
                             body.dnsAlias = dnsRecord;
+				console.log('this is ting');
+				console.log(body);
                             res.end(JSON.stringify(body));
                         });
                     });
@@ -3152,7 +3142,7 @@ const server = http.createServer((req, res) => {
             [ipRegex]: {
                 handle: () => {
                     const { headers } = req;
-                    const requesterIp = "::1";//headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
                     console.log(req.connection.remoteAddress);
                     console.log('requester ip');
                     console.log(requesterIp);
@@ -3476,7 +3466,7 @@ wss.on('connection', (ws, req) => {
                 verifyToken(message.username, message.accessToken).then(() => {
                     const ipSub = message.localIp.replace(/\./g, '-');
                     const userHash = getUserHash(message.username);
-                    const userUrl = `${ipSub}.${userHash}.homegames.link`;
+                    const userUrl = `${ipSub}.${userHash}.${CERT_DOMAIN}`;
                     verifyDNSRecord(userUrl, message.localIp).then(() => {
                         ws.send(JSON.stringify({
                             msgId: message.msgId,
