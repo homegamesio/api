@@ -127,11 +127,9 @@ const downloadZip = (url) =>
     const zipWriteStream = fs.createWriteStream(zipPath);
 
     zipWriteStream.on('close', () => {
-            console.log('reososeoso');
-            console.log(zipPath);
-		resolve({
-			zipPath
-		});
+        resolve({
+	    zipPath
+	});
     });
 
     https.get(url, (res) => {
@@ -154,8 +152,6 @@ const downloadFromGithub = (owner, repo, commit = '') =>
 
 const getMongoClient = () => {
     const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
-    console.log("URI");
-    console.log(uri);
     const params = {};
     if (DB_USERNAME) {
         params.auth = {
@@ -233,13 +229,9 @@ const listBlogPosts = (limit, offset, sort, query, includeMostRecent) => new Pro
               ]
             };
         } 
-        console.log('cikciciciciic ' + limit + ', offset: ' + offset + ', include ' + includeMostRecent);
         collection.countDocuments(dbQuery).then((count) => {
             collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(posts => {
-                console.log("the fuck lol " + includeMostRecent);
-                console.log(includeMostRecent);
                 if (!!includeMostRecent) {
-                    console.log('dodididin 1');
                     const mostRecent = posts.length ? mapBlogPost(posts[0], true) : null;
                     resolve({ posts: posts.map(p => mapBlogPost(p, false)), count, mostRecent });
                 } else {
@@ -314,11 +306,6 @@ const generateJwt = (userId) => {
     const encodedPayload = base64UrlEncode(payload);
     const encodedSignature = getSignature(encodedHeader, encodedPayload);
 
-    console.log('jdjdjdj');
-    console.log(encodedSignature);
-    console.log('fjfjfjfjfjfjfjfjb ');
-    console.log(encodedPayload);
-
     return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
 };
 
@@ -352,9 +339,7 @@ const signup = (request) => new Promise((resolve, reject) => {
         reject('signup requires username & password');
     } else {
         if (AUTH_TYPE === 'mongo') {
-            console.log('babba');
             mongoSignup(username, password).then(resolve).catch((err) => {
-                console.log('sdfdsfdks ' + err);
                 reject(err);
             });
         }
@@ -453,7 +438,6 @@ const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
                 }); 
             }
         } else {
-            console.log("FSDHFKJSDFJKDSF");
             reject('Too many requests for IP');
         }
     });
@@ -627,8 +611,6 @@ const uploadMongo = (developerId, assetId, filePath, fileName, fileSize, fileTyp
         const db = client.db(DB_NAME);
         const collection = db.collection('assets');
         collection.findOne({ assetId }).then(asset => {
-            console.log("found asset to upload");
-            console.log(asset);
             const documentCollection = db.collection('documents');
             documentCollection.insertOne({ developerId, assetId, data: new Binary(fs.readFileSync(filePath)), fileSize, fileType }).then(() => resolve(assetId)).catch(reject);
         });
@@ -671,64 +653,6 @@ const logSuccess = (funcName) => {
 const logFailure = (funcName) => {
     console.error(`function ${funcName} failed`);
 };
-
-
-// todo: move to common
-const createDNSRecord = (url, ip) => new Promise((resolve, reject) => {
-    const params = {
-        ChangeBatch: {
-            Changes: [
-                {
-                    Action: 'CREATE', 
-                    ResourceRecordSet: {
-                        Name: url,
-                        ResourceRecords: [
-                            {
-                                Value: ip
-                            }
-                        ], 
-                        TTL: 60, 
-                        Type: 'A'
-                    }
-                }
-            ]
-        }, 
-        HostedZoneId: process.env.AWS_ROUTE_53_HOSTED_ZONE_ID
-    };
-
-    const route53 = new aws.Route53();
-    
-    route53.changeResourceRecordSets(params, (err, data) => {
-        resolve();
-    });
-});
-
-const verifyDNSRecord = (url, ip) => new Promise((resolve, reject) => {
-    const route53 = new aws.Route53();
-
-    const params = {
-        HostedZoneId: process.env.AWS_ROUTE_53_HOSTED_ZONE_ID,
-        StartRecordName: url,
-        StartRecordType: 'A',
-        MaxItems: '1'
-    };
-    
-    route53.listResourceRecordSets(params, (err, data) => {
-        if (err) {
-            console.log('error');
-            console.error(err);
-            reject();
-        } else {
-            if (data.ResourceRecordSets.length === 0 || data.ResourceRecordSets[0].Name !== url) {
-                createDNSRecord(url, ip).then(() => {
-                    resolve();
-                });
-            } else {
-                resolve();
-            }
-        }
-    });
-});
 
 const redisClient = () => new Promise((resolve, reject) => {
     setTimeout(() => {
@@ -792,23 +716,6 @@ const getHostInfo = (publicIp, serverId) => new Promise((resolve, reject) => {
         });
     });
 
-});
-
-const uploadThumbnail = (username, gameId, thumbnail) => new Promise((resolve, reject) => {
-    const assetId = generateId();
-
-    const childSession = fork(path.join(__dirname, 'upload.js'),
-        [
-            `--path=${thumbnail.path}`,
-            `--developer=${username}`,
-            `--id=${assetId}`,
-            `--name=${thumbnail.originalFilename}`,
-            `--size=${thumbnail.size}`,
-            `--type=${thumbnail.headers['content-type']}`
-        ]
-    );
-
-    resolve('https://assets.homegames.io/' + assetId);
 });
 
 const getProfileInfo = (userId) => new Promise((resolve, reject) => {
@@ -923,29 +830,6 @@ const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((
             });
         }
     });
-});
-
-const createUserImagePublishRequest = (userId, assetId) => new Promise((resolve, reject) => {
-    const messageBody = JSON.stringify({ userId, assetId, type: 'userImage' });
-    
-    const sqsParams = {
-        MessageBody: messageBody,
-        QueueUrl: process.env.SQS_IMAGE_QUEUE_URL,
-        MessageGroupId: Date.now() + '',
-        MessageDeduplicationId: Date.now() + ''
-    };
-
-    console.log('params!');
-    console.log(sqsParams);
-    
-    const sqs = new aws.SQS({region: 'us-west-2'});
-    
-    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
-        console.log(err);
-        console.log(sqsResponse);
-        resolve();
-    });
- 
 });
 
 const updateProfileInfo = (userId, { description, image }) => new Promise((resolve, reject) => {
@@ -2155,17 +2039,6 @@ const server = http.createServer((req, res) => {
                                     }
                                 });
                             }
-//                                    if (files.thumbnail?.length) {
-//                                        console.log('need to do something with thumbnail');
-
-//                                        createGameImagePublishRequest(userId, image, gameId);
-    
-                                        //uploadThumbnail(userId, gameId, files.thumbnail[0]).then((url) => {
-                                        //}).catch(err => {
-                                        //    console.log('failed to upload thumbnail');
-                                        //    console.error(err);
-                                        //});
-//                                    }
                         }
                     });
                 }
@@ -2497,12 +2370,8 @@ const server = http.createServer((req, res) => {
         'GET': {
             [certStatusRegex]: {
                 handle: () => {
-			console.log('fuk');
-
                     const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
                     getCertStatus(requesterIp).then((certStatus) => {
-                        console.log('cert status');
-                        console.log(certStatus);
                         const body = certStatus;
                         getDnsRecord(requesterIp).then((dnsRecord) => {   
                             console.log('this is the dns record');
@@ -2691,10 +2560,6 @@ const server = http.createServer((req, res) => {
                 handle: () => {
                     const { headers } = req;
                     const requesterIp = headers['x-forwarded-for'] || req.connection.remoteAddress;
-                    console.log(req.connection.remoteAddress);
-                    console.log('requester ip');
-                    console.log(requesterIp);
-                    console.log(headers);
                     res.end(requesterIp);
                 }
             },
@@ -2845,14 +2710,12 @@ const server = http.createServer((req, res) => {
         }
     };
     if (req.method === 'OPTIONS') {
-        console.log('dsfsdf');
         res.writeHead(200);
         res.end();
     } else if (!requestHandlers[req.method]) {
         res.writeHead(400);
         res.end('Unsupported method: ' + req.method);
     } else {
-        console.log('asduoa ' +req.method + " - "  + req.url);
         // sort with largest values upfront to get the most specific match
         const matchers = Object.keys(requestHandlers[req.method]).sort((a, b) => b.length - a.length);
         let matched = null;
@@ -2892,79 +2755,5 @@ const server = http.createServer((req, res) => {
 
 });
 
-const wss = new WebSocket.Server({ server });
-
-const clients = {};
-
-wss.on('connection', (ws, req) => {
-    const publicIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-
-    if (!publicIp) {
-        console.log('No public IP found for websocket connection.');
-        return;
-    }
-
-    const socketId = generateSocketId();
-
-    ws.id = socketId;
-
-    clients[ws.id] = ws;
-
-    console.log(`registering socket client with id: ${ws.id}`);
-
-    ws.on('message', (_message) => {
-       
-        try {
-            const message = JSON.parse(_message);
-
-            if (message.type === 'heartbeat') {
-                updatePresence(publicIp, ws.id).then(logSuccess('updatePresence')).catch(logFailure('updatePresence'));
-            } else if (message.type === 'register') {
-                registerHost(publicIp, message.data, ws.id).then(logSuccess('registerHost')).catch(logFailure('registerHost'));
-            } else if (message.type === 'verify-dns') {
-                console.log('verifying dns for user ' + message.username);
-                verifyToken(message.username, message.accessToken).then(() => {
-                    const ipSub = message.localIp.replace(/\./g, '-');
-                    const userHash = getUserHash(message.username);
-                    const userUrl = `${ipSub}.${userHash}.${CERT_DOMAIN}`;
-                    verifyDNSRecord(userUrl, message.localIp).then(() => {
-                        ws.send(JSON.stringify({
-                            msgId: message.msgId,
-                            url: userUrl,
-                            success: true
-                        }));
-                        updateHostInfo(publicIp, ws.id, {verifiedUrl: userUrl}).then(logSuccess('upateHostInfo')).catch(logFailure('updateHostInfo'));
-                    }).catch(logFailure('verifyDNSRecord'));
-                }).catch(err => {
-                    console.log('Failed to verify access token for user ' + message.username);
-                    console.error(err);
-                    ws.send(JSON.stringify({
-                        msgId: message.msgId,
-                        success: false,
-                        error: 'Failed to verify access token'
-                    }));
-                    logFailure('verifyAccessToken');
-                });
-            } else {
-                console.log('received message without ip');
-                console.log(message);
-            }
-        } catch (err) {
-            console.log('Error processing client message');
-            console.error(err);
-        }
-
-    });
-
-    ws.on('close', () => {
-        console.log(`deregistering socket client with id: ${ws.id}`);
-
-        clients[ws.id] && delete clients[ws.id];
-
-        deleteHostInfo(publicIp, ws.id).then(() => {
-            console.log(`deregistered socket client with id: ${ws.id}`);
-        });
-    });
-});
 
 server.listen(process.env.PORT || 80);
