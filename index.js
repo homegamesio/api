@@ -79,10 +79,14 @@ const verifyToken = (token) => new Promise((resolve, reject) => {
 
             const payload = base64UrlDecode(tokenPayload);
             const validSignature = getSignature(tokenHeader, tokenPayload);
-            if (validSignature == tokenSignature) {
-                resolve(payload);
+            if (!payload.iat || payload.iat + (15 * 60 * 1000) <= Date.now()) {
+                reject('Expired token');
             } else {
-                reject('Invalid token');
+                if (validSignature == tokenSignature) {
+                    resolve(payload);
+                } else {
+                    reject('Invalid token');
+                }
             }
         }
     }
@@ -1750,8 +1754,6 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
     };
 
     getCertRecord(publicIp).then((certRecord) => {
-        console.log('this is cert record');
-        console.log(certRecord);
         if (certRecord) {
             body.certFound = true;
             body.certExpiration = certRecord.expiresAt;
@@ -2738,7 +2740,8 @@ const server = http.createServer((req, res) => {
                             handlerInfo.handle(userInfo.userId, ...matchedParams);
                         }).catch(err => {
                             console.error(err);
-                            res.end('Unexpected error occured');
+                            res.writeHead(401);
+                            res.end(err);
                         });
                     }
                 } else {
@@ -2754,6 +2757,5 @@ const server = http.createServer((req, res) => {
     }
 
 });
-
 
 server.listen(process.env.PORT || 80);
