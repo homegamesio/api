@@ -1013,142 +1013,6 @@ const updateMongoProfileInfo = (userId, { description, image }) => new Promise((
     });
 });
 
-const getLatestGameVersion = (gameId) => new Promise((resolve, reject) => {
-    const readClient = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'game_versions',
-        ScanIndexForward: false,
-        Limit: 1,
-        KeyConditionExpression: '#game_id = :game_id',
-        ExpressionAttributeNames: {
-            '#game_id': 'game_id',
-        },
-        ExpressionAttributeValues: {
-            ':game_id': gameId
-        }
-    };
-
-    readClient.query(params, (err, results) => {
-        if (err) {
-            console.log(err);
-            reject(err.toString());
-        } else {
-            if (results.Items.length) {
-                resolve(Number(results.Items[0].version));
-            } else {
-                resolve(null);
-
-            }
-        }
-    });
- 
-});
-
-
-// unlisted
-const publishGameVersion = (publishRequest) => new Promise((resolve, reject) => {
-    const gameId = publishRequest.game_id;
-    const requestId = publishRequest.request_id;
-
-    const s3Url = getS3Url(gameId, requestId);
-
-    // verify code is publicly available
-    https.get(s3Url, (res) => {
-        if (res.statusCode != 200) {
-            console.log('bad status code');
-            reject();
-        } else {
-            getLatestGameVersion(gameId).then(currentVersion => {
-                const client = new aws.DynamoDB({
-                    region: 'us-west-2'
-                });
-
-                const newVersion = currentVersion ? currentVersion + 1 : 1;
-                getGame(gameId).then(gameData => {
-    
-                    const params = {
-                        TableName: 'game_versions',
-                        Item: {
-                            'version': {
-                                N: '' + newVersion
-                            },
-                            'commit_hash': {
-                                S: publishRequest.commit_hash
-                            },
-                            'description': {
-                                S: publishRequest.notes || 'No description available'
-                            },
-                            'location': {
-                                S: s3Url
-                            },
-                            'published_at': {
-                                N: '' + Date.now()
-                            },
-                            'published_by': {
-                                S: publishRequest.requester
-                            },
-                            'request_id': {
-                                S: requestId
-                            },
-                            'game_id': {
-                                S: gameId
-                            },
-                            'version_id': {
-                                S: generateId()
-                            }
-                        }
-                    };
-        
-                    client.putItem(params, (err, putResult) => {
-                        if (!err) {
-                            console.log('published new game version of game id ' + gameId);
-                            resolve();
-                        } else {
-                            console.log('failed to publish version');
-                            console.log(err);
-                            reject(err);
-                        }
-                    });
-                });
-            });
-        }
-    });
-});
-
-const verifyCode = (code, requestId) => new Promise((resolve, reject) => {
-    console.log(`verifying code ${code} with request ${requestId}`);
-    const ddb = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'verification_requests',
-        Key: {
-            'publish_request_id': {
-                S: requestId
-            }
-        }
-    };
-
-    ddb.getItem(params, (err, data) => {
-        if (err) {
-            console.log(err);
-            reject();
-        } else {
-            const _requestCode = data.Item.code.S;
-            if (code == _requestCode) {
-                resolve();
-            } else {
-                console.log('requested code doesnt match code in record');
-                reject();
-            }
-        }
-    });
-});
-
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
     console.log('looking for ' + requestId);
     getMongoCollection('publishRequests').then((collection) => {
@@ -1163,12 +1027,6 @@ const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
 
 });
 
-
-// copied from homedome
-const getS3Url = (gameId, requestId) => {
-    return `https://hg-games.s3-us-west-2.amazonaws.com/${gameId}/${requestId}/code.zip`;
-};
-
 const updatePublishRequestState = (requestId, gameId, sourceInfoHash, newStatus) => new Promise((resolve, reject) => {
     getMongoCollection('publishRequests').then((publishRequests) => {
         publishRequests.updateOne({ requestId }, { "$set": { status: newStatus } }).catch(reject).then(() => {
@@ -1176,62 +1034,6 @@ const updatePublishRequestState = (requestId, gameId, sourceInfoHash, newStatus)
         });
     });
 
-});
-
-const emitEvent = (requestId, eventType, message = null) => new Promise((resolve, reject) => {
-
-    const client = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_events',
-        Item: {
-            'request_id': {
-                S: requestId
-            },
-            'event_date': {
-                N: `${Date.now()}`
-            },
-            'event_type': {
-                S: eventType
-            }
-        }
-    };
-
-    if (message != null) {
-        params.Item.message = {S: message};
-    }
-
-    client.putItem(params, (err, putResult) => {
-        if (!err) {
-            resolve();
-        } else {
-            reject(err);
-        }
-    });
-});
-
-const verifyPublishRequest = (code, requestId) => new Promise((resolve, reject) => {
-    emitEvent(requestId, 'VERIFICATION_ATTEMPT', 'Attempting to verify publish request from email code').then(() => {
-        verifyCode(code, requestId).then(() => {
-            getPublishRequest(requestId).then(requestData => {
-                console.log('got this rrequest data');
-                console.log(requestData);
-                const { game_id, source_info_hash } = requestData;
-                if (requestData.status == 'CONFIRMED') {
-                    reject('already confirmed');
-                } else {
-                    resolve(requestData); 
-                }
-            });
-        }).catch(err => {
-            console.log('verify error ' + err);
-            emitEvent(requestId, 'VERIFICATION_ERROR', 'Failed verifying code').then(() => {
-                reject();
-            });
-        });
-    });
 });
 
 // 50 MB max
@@ -1380,77 +1182,11 @@ const createMongoAssetRecord = (developerId, assetId, size, name, metadata, desc
     });
 });
 
-const createRecord = (developerId, assetId, size, name, metadata) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB({
-        region: 'us-west-2'
-    });
-    const params = {
-        TableName: 'homegames_assets',
-        Item: {
-            'developer_id': {
-                S: developerId
-            },
-            'asset_id': {
-                S: assetId
-            },
-            'created_at': {
-                N: '' + Date.now()
-            },
-            'metadata': {
-                S: JSON.stringify(metadata)
-            },
-            'status': {
-                S: 'created'
-            },
-            'size': {
-                N: '' + size
-            },
-            'name': {
-                S: name
-            }
-        }
-    };
-
-    client.putItem(params, (err, putResult) => {
-        if (!err) {
-            resolve();
-        } else {
-            reject(err);
-        }
-    });
-
-});
-
 const DEFAULT_GAME_ORDER = {
     'game_name': {
         order: 'asc'
     }
 };
-
-const getPublishRequestEvents = (requestId) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'publish_events',
-        KeyConditionExpression: '#request_id= :request_id',
-        ExpressionAttributeNames: {
-            '#request_id': 'request_id'
-        },
-        ExpressionAttributeValues: {
-            ':request_id': requestId 
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-        }
-        resolve({events: data.Items});
-    });
-
-});
 
 const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
     getMongoCollection('publishRequests').then((collection) => {
@@ -1566,34 +1302,6 @@ const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolv
     });
 });
 
-const dynamoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
-
-    const client = new aws.DynamoDB.DocumentClient({
-        region: process.env.DYNAMO_REGION
-    });
-
-    const params = {
-        TableName: process.env.GAME_TABLE,
-        IndexName: 'created_by_index',
-        KeyConditionExpression: '#created_by = :created_by',
-        ExpressionAttributeNames: {
-            '#created_by': 'created_by'
-        },
-        ExpressionAttributeValues: {
-            ':created_by': author
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            reject([{error: err}]);
-        } else {
-            resolve(data.Items.map(mapGame));
-        }
-    });
-
-});
-
 const getGameDetails = (gameId) => new Promise((resolve, reject) => { 
     getMongoCollection('games').then(collection => {
         collection.findOne({ gameId }).then(gameResult => {
@@ -1602,8 +1310,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
-                    console.log('versions!');
-                    console.log(versions);
                         resolve({
                             game: {
                                 name: gameResult.name,
@@ -1629,8 +1335,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
 });
 
 const assetResponse = (asset) => {
-    console.log('ayo!');
-    console.log(asset);
     return {
         id: asset.assetId,
         developerId: asset.developerId,
@@ -1641,49 +1345,6 @@ const assetResponse = (asset) => {
         type: asset.metadata?.['Content-Type'] || null
     }
 };
-
-const mapGameVersion = (gameVersion) => {
-    return {
-        version: gameVersion.version,
-        publishedBy: gameVersion.published_by,
-        'location': gameVersion['location'],
-        description: gameVersion.description,
-        versionId: gameVersion.version_id,
-        publishedAt: gameVersion.published_at,
-        commitHash: gameVersion.commit_hash,
-        gameId: gameVersion.game_id,
-        isReviewed: gameVersion.is_reviewed
-    };
-};
-
-const queryGames = (query) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: process.env.DYNAMO_REGION
-    });
-
-    const params = {
-        TableName: process.env.GAME_TABLE,
-        IndexName: 'name_index',
-        KeyConditionExpression: '#published_state = :approved and begins_with(#name, :name)',
-        ExpressionAttributeNames: {
-            '#published_state': 'published_state',
-            '#name': 'name'
-        },
-        ExpressionAttributeValues: {
-            ':name': query,
-            ':approved': 'APPROVED'
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (err) {
-            console.log(err);
-            reject(err);
-        } else {
-            resolve(data.Items.map(mapGame));
-        }
-    });
-});
 
 const mapGame = (game) => {
     return {
@@ -1952,70 +1613,7 @@ const listMyGames = (developerId, limit = 10, offset = 0, query) => new Promise(
    
 });
 
-const getGameVersion = (gameId, sourceInfoHash) => new Promise((resolve, reject) => {
-//    const ddb = new aws.DynamoDB({
-//        region: 'us-west-2'
-//    });
-//
-//    const params = {
-//        TableName: 'game_versions',
-//        IndexName: 'request_id_index',
-//        Key: {
-//            'request_id': {
-//                S: `${gameId}:${sourceInfoHash}`
-//            }
-//        }
-//    };
-//
-//    ddb.getItem(params, (err, data) => {
-//        if (err) {
-//            console.log(err);
-//            reject();
-//        } else {
-//            resolve(data.Item);
-//        }
-//    });
-
-    const readClient = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'game_versions',
-        IndexName: 'request_id_index',
-        Limit: 1,
-        KeyConditionExpression: '#request_id = :request_id',
-        ExpressionAttributeNames: {
-            '#request_id': 'request_id',
-        },
-        ExpressionAttributeValues: {
-            ':request_id': `${gameId}:${sourceInfoHash}`
-        }
-    };
-
-    readClient.query(params, (err, results) => {
-        if (err) {
-            console.log(err);
-            reject(err.toString());
-        } else {
-            if (results.Items.length) {
-                resolve(results.Items[0]);
-                //resolve(Number(results.Items[0].version));
-            } else {
-                resolve(null);
-
-            }
-        }
-    });
- 
-
-});
-
 const adminPublishRequestAction = (requestId, action, message) => new Promise((resolve, reject) => {
-    console.log('huh');
-    console.log(requestId);
-    console.log(action);
-    console.log(message);
     if (!action || (action !== 'reject' && action !== 'approve')) {
         reject('invalid action');
     }
@@ -3113,32 +2711,6 @@ const server = http.createServer((req, res) => {
                         console.log('game detail fetch err');
                         console.log(err);
                         res.end('Game not found');
-                    });
-                }
-            },
-            [publishRequestEventsRegex]: {
-                requiresAuth: true,
-                handle: (userId, gameId) => {
-                    getPublishRequestEvents(gameId).then((publishRequests) => {
-                        res.end(JSON.stringify(publishRequests));
-                    });
-                }
-            },
-            [verifyPublishRequestRegex]: {
-                handle: () => {
-                    const queryObject = url.parse(req.url, true).query;
-                    const { code, requestId } = queryObject;
-                
-                    verifyPublishRequest(code, requestId).then((publishRequest) => {
-                        publishGameVersion(publishRequest).then(() => {
-                            emitEvent(requestId, 'VERIFICATION_SUCCESS').then(() => {
-                                updatePublishRequestState(requestId, publishRequest.game_id, publishRequest.source_info_hash, 'CONFIRMED').then(() => {
-                                    res.end('verified!');
-                                });
-                            });
-                        });
-                    }).catch(err => {
-                        res.end(err);
                     });
                 }
             },
