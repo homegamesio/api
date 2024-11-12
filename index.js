@@ -2162,7 +2162,7 @@ const server = http.createServer((req, res) => {
                     console.log('requester ip ' + requesterIp);
                     
                     const supportedModels = {
-                        'mistral-7b-instruct-v0.2': {
+                        'mistral-7b-v0.2': {
                             // not sure what to put here (if anything) yet. maybe model-specific config / safeguards
                         }
                     };
