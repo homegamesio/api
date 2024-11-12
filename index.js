@@ -350,61 +350,19 @@ const signup = (request) => new Promise((resolve, reject) => {
     }
 });
 
-const getLatestContentRequestForIp = (ip) => new Promise((resolve, reject) => {
-    const client = new aws.DynamoDB.DocumentClient({
-        region: 'us-west-2'
-    });
-
-    const params = {
-        TableName: 'content-requests',
-        IndexName: 'ip_address_index',
-        Limit: 1,
-        ScanIndexForward: false,
-        KeyConditionExpression: '#ip_address = :ip_address',
-        ExpressionAttributeNames: {
-            '#ip_address': 'ip_address'
-        },
-        ExpressionAttributeValues: {
-            ':ip_address': ip
-        }
-    };
-
-    client.query(params, (err, data) => {
-        if (data?.Items?.length) {
-            resolve(data.Items[0]);
-        } else {
-            resolve(null);
-        }
-//        if (err) {
-//            reject([{error: err}]);
-//        } else {
-//            resolve(data.Items.map(mapGame));
-//        }
-    });
-
-});
-
 const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
-//    getLatestContentRequestForIp(ip).then((last) => {
-//        if (!last || last.created_at + (30 * 1000) < Date.now()) {
-//            if (!request.type) {
-//                reject('i aint got no type');
-//            } else {
-                const requestId = uuidv4();
+    const requestId = uuidv4();
 
-		// todo: i dont like storing these. maybe store in redis with short (< 1 hour) ttl if we need to store ip (if we have lots of users)
-		getMongoCollection('contentRequests').then((collection) => {
-			const now = Date.now();
-                	const messageBody = JSON.stringify({ requestId, created: now, type: request.type, model: request.model, prompt: request.prompt });
-			collection.insertOne({ requestId, created: now }).then(() => {
-				createContentRequest(messageBody).then(() => {
-                            		resolve(requestId);
-				});
-			});
-		});
-        //} else {
-        //    reject('Too many requests for IP');
-        //}
+    // todo: i dont like storing these. maybe store in redis with short (< 1 hour) ttl if we need to store ip (if we have lots of users)
+    getMongoCollection('contentRequests').then((collection) => {
+        const now = Date.now();
+        const messageBody = JSON.stringify({ requestId, created: now, type: request.type, model: request.model, prompt: request.prompt });
+	collection.insertOne({ requestId, created: now }).then(() => {
+	    createContentRequest(messageBody).then(() => {
+                resolve(requestId);
+	    });
+        });
+    });
 });
 
 const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
