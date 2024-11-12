@@ -385,66 +385,26 @@ const getLatestContentRequestForIp = (ip) => new Promise((resolve, reject) => {
 });
 
 const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
-    getLatestContentRequestForIp(ip).then((last) => {
-        if (!last || last.created_at + (30 * 1000) < Date.now()) {
-            if (!request.type) {
-                reject('i aint got no type');
-            } else {
+//    getLatestContentRequestForIp(ip).then((last) => {
+//        if (!last || last.created_at + (30 * 1000) < Date.now()) {
+//            if (!request.type) {
+//                reject('i aint got no type');
+//            } else {
                 const requestId = uuidv4();
- 
-                const ddbClient = new aws.DynamoDB({
-                    region: 'us-west-2'
-                });
 
-                const now = Date.now();
-
-                const messageBody = JSON.stringify({ requestId, createdAt: now, type: request.type, model: request.model, prompt: request.prompt });
-
-// todo: i dont like storing these. maybe store in redis with short (< 1 hour) ttl
-                const params = {
-                    TableName: 'content-requests',
-                    Item: {
-                        'request_id': {
-                            S: requestId
-                        },
-                        'created_at': {
-                            N: `${now}`
-                        },
-                        'ip_address': {
-                            S: '' + ip
-                        }
-                    }
-                };
-
-                ddbClient.putItem(params, (err, putResult) => {
-                    console.log(err);
-                    console.log(putResult);
-            
-                    const sqsParams = {
-                        MessageBody: messageBody,
-                        QueueUrl: process.env.CONTENT_QUEUE_URL,
-                        MessageGroupId: Date.now() + '',
-                        MessageDeduplicationId: Date.now() + ''
-                    };
-
-                    const sqs = new aws.SQS({region: 'us-west-2'});
-                    
-                    sqs.sendMessage(sqsParams, (err, sqsResponse) => {
-                        console.log(err);
-                        console.log(sqsResponse);
-                        if (err) {
-                            reject(err);
-                        } else {
-                            resolve(requestId);
-                        }
-                    });
-
-                }); 
-            }
-        } else {
-            reject('Too many requests for IP');
-        }
-    });
+		// todo: i dont like storing these. maybe store in redis with short (< 1 hour) ttl if we need to store ip (if we have lots of users)
+		getMongoCollection('contentRequests').then((collection) => {
+			const now = Date.now();
+                	const messageBody = JSON.stringify({ requestId, created: now, type: request.type, model: request.model, prompt: request.prompt });
+			collection.insertOne({ requestId, created: now }).then(() => {
+				createContentRequest(messageBody).then(() => {
+                            		resolve(requestId);
+				});
+			});
+		});
+        //} else {
+        //    reject('Too many requests for IP');
+        //}
 });
 
 const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
@@ -828,6 +788,29 @@ const createGameImagePublishRequest = (userId, assetId, gameId) => new Promise((
                     });
 
                     channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'GAME_IMAGE_APPROVAL_REQUEST', userId, assetId, gameId })), { persistent: true });
+                    console.log('sent message');
+                    resolve();
+                }
+            });
+        }
+    });
+});
+
+const createContentRequest = (req) => new Promise((resolve, reject) => {
+    amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+        if (err) {
+            reject(err);
+        } else {
+            conn.createChannel((err1, channel) => {
+                if (err1) {
+                    reject(err1);
+                } else {
+                    console.log('created channel');
+                    channel.assertQueue(JOB_QUEUE_NAME, {
+                        durable: true
+                    });
+
+                    channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CONTENT_REQUEST', data: req })), { persistent: true });
                     console.log('sent message');
                     resolve();
                 }
@@ -2455,41 +2438,17 @@ const server = http.createServer((req, res) => {
             },
             [serviceRequestsRegex]: {
                 handle: (requestId) => {
-                    const readClient = new aws.DynamoDB.DocumentClient({
-                        region: 'us-west-2'
-                    });
-
-                    const params = {
-                        TableName: 'content-requests',
-                        ScanIndexForward: false,
-                        Limit: 1,
-                        KeyConditionExpression: '#request_id = :request_id',
-                        ExpressionAttributeNames: {
-                            '#request_id': 'request_id',
-                        },
-                        ExpressionAttributeValues: {
-                            ':request_id': requestId
-                        }
-                    };
-
-                    readClient.query(params, (err, results) => {
-                        if (err) {
-                            console.log(err);
-                            res.end(err.toString());
-                        } else {
-                            if (results.Items.length) {
-                                const response = {
-                                    response: results.Items[0].response ? JSON.parse(results.Items[0].response) : null,
-                                    createdAt: results.Items[0].created_at,
-                                    requestId
-                                };
-                                res.end(JSON.stringify(response));
-                            } else {
-                                res.end("{}");
-                            }
-                        }
-                    });
- 
+                    getMongoCollection('contentRequests').then((contentRequests) => {
+			console.log("looking for conttent request " + requestId);
+			contentRequests.findOne({ requestId }).then((req) => {
+				console.log(req);
+				if (!req) {
+					res.end('{}');
+				} else {
+					res.end(JSON.stringify({ response: req.response || null, createdAt: req.created, requestId }));
+				}
+			});
+		    });
                 }
             },
             [listMyGamesRegex]: {
