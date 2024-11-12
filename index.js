@@ -2,7 +2,6 @@ const http = require('http');
 const decompress = require('decompress');
 const acme = require('acme-client');
 const https = require('https');
-const unzipper = require('unzipper');
 const url = require('url');
 const archiver = require('archiver');
 const fs = require('fs');
@@ -16,7 +15,6 @@ const path = require('path');
 const WebSocket = require('ws');
 const process = require('process');
 const { getUserHash } = require('homegames-common');
-const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const { Binary, MongoClient } = require('mongodb');
 const amqp = require('amqplib/callback_api');
@@ -464,65 +462,6 @@ const challengeRemoveFn = async(authz, challenge, keyAuthorization) => {
     }
 };
 
-const deleteHostInfo = (publicIp, localIp) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-
-        client.hdel(publicIp, [localIp], (err, data) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve();
-            }
-        });
-    });
-});
-
-const registerHost = (publicIp, info, hostId) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-
-        const doUpdate = () => {
-            const payload = Object.assign({}, info);
-            payload.timestamp = Date.now();
-            client.hmset(publicIp, [hostId, JSON.stringify(payload)], (err, data) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve();
-                }
-            });
-        };
-
-        // clear out existing entries
-        client.hgetall(publicIp, (err, data) => {
-            const idsToRemove = [];
-            for (serverId in data) {
-                const serverInfo = JSON.parse(data[serverId]);
-                if (serverInfo.localIp && serverInfo.localIp === info.localIp || !serverInfo.timestamp || serverInfo.timestamp + (5 * 1000 * 60) <= Date.now()) {
-                    idsToRemove.push(serverId);
-                }
-            }
-
-            let toDeleteCount = idsToRemove.length;
-
-            if (toDeleteCount === 0) {
-                doUpdate();
-            } else {
-
-                for (const idIndex in idsToRemove) {
-                    const id = idsToRemove[idIndex];
-
-                    client.hdel(publicIp, [id], (err, data) => {
-                        toDeleteCount -= 1;
-                        if (toDeleteCount == 0) {
-                            doUpdate();
-                        }
-                    });
-                }
-            }
-        });
-    });
-});
-
 const generateSocketId = () => {
     return uuidv4();
 };
@@ -539,35 +478,6 @@ const uploadMongo = (developerId, assetId, filePath, fileName, fileSize, fileTyp
     }); 
 });
 
-const updatePresence = (publicIp, serverId) => {
-    console.log(`updating presence for server ${serverId}`);
-    getHostInfo(publicIp, serverId).then(hostInfo => {
-        if (!hostInfo) {
-            console.warn(`no host info found for server ${serverId}`);
-            reject();
-        }
-        registerHost(publicIp, JSON.parse(hostInfo), serverId).then(() => {
-            console.log(`updated presence for server ${serverId}`);
-            resolve();
-        });
-    });
-};
-
-const updateHostInfo = (publicIp, serverId, update) => new Promise((resolve, reject) => {
-    console.log(`updating host info for server ${serverId}`);
-    getHostInfo(publicIp, serverId).then(hostInfo => {
-        const newInfo = Object.assign(JSON.parse(hostInfo), update);
-        registerHost(publicIp, newInfo, serverId).then(() => {
-            console.log(`updated host info for server ${serverId}`);
-            resolve();
-        }).catch(err => {
-            console.error(`failed to update host info for server ${serverId}`);
-            console.error(err);
-            reject();
-        });
-    });
-});
-
 const logSuccess = (funcName) => {
     console.error(`function ${funcName} succeeded`);
 };
@@ -575,70 +485,6 @@ const logSuccess = (funcName) => {
 const logFailure = (funcName) => {
     console.error(`function ${funcName} failed`);
 };
-
-const redisClient = () => new Promise((resolve, reject) => {
-    setTimeout(() => {
-        reject('Redis connection timed out');
-    }, 30 * 1000);
-    const client = redis.createClient({
-        host: process.env.REDIS_HOST,
-        port: process.env.REDIS_PORT
-    }).on('error', (err) => {
-        reject(err);
-    }).on('ready', () => {
-        resolve(client);
-    });
-});
-
-const redisGet = (key) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-        client.get(key, (err, res) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(res);
-            }
-        });
-    });
-});
-
-const redisSet = (key, value) => new Promise((resolve, reject) => { 
-    redisClient().then(client => {
-        client.set(key, value, (err, res) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(res);
-            }
-        });
-    });
-
-});
-
-const redisHmset = (key, obj) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-        client.get(key, (err, res) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(res);
-            }
-        });
-    });
-});
-
-const getHostInfo = (publicIp, serverId) => new Promise((resolve, reject) => {
-    redisClient().then(client => {
-        client.hmget(publicIp, [serverId], (err, data) => {
-            if (err || !data) {
-                reject(err || 'No host data found');
-            } else {
-                resolve(data[0]);
-            }
-        });
-    });
-
-});
 
 const getProfileInfo = (userId) => new Promise((resolve, reject) => {
     getMongoProfileInfo(userId).then(resolve).catch(reject);
