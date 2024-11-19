@@ -1349,6 +1349,7 @@ const transformS3Response = (s3Content) => {
 };
 
 const fillS3Cache = () => new Promise((resolve, reject) => {
+    const aws = require('aws-sdk');
     const s3 = new aws.S3();
 
     const getNext = (continuationToken) => new Promise((resolve, reject) => {
