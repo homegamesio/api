@@ -1616,7 +1616,7 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
         reject('Certs not available in this environment');
     } else {
         getCertStatus(publicIp).then(certInfo => {
-            if (certInfo.certData && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
+            if (certInfo.cert && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
                 reject('A valid cert has already been created for this IP (' + publicIp + ').  If you do not have access to your private key, contact us to generate a new one');
             } else {
                 amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
@@ -2174,6 +2174,10 @@ const server = http.createServer((req, res) => {
 				console.log(body);
                             res.end(JSON.stringify(body));
                         });
+                    }).catch(err => {
+                        // todo: have better status codes. this is only one reason an error would be thrown
+                        res.writeHead(400);
+                        res.end(err);
                     });
                 }
             },
