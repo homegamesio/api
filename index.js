@@ -1730,6 +1730,10 @@ const server = http.createServer((req, res) => {
                             });
                             res.end(zippedB64);
                         });
+                    }).catch(err => {
+                        // todo: have better status codes. this is only one reason an error would be thrown
+                        res.writeHead(400);
+                        res.end(err);
                     });
                 }
             },
