@@ -18,6 +18,7 @@ const { getUserHash } = require('homegames-common');
 const { v4: uuidv4 } = require('uuid');
 const { Binary, MongoClient } = require('mongodb');
 const amqp = require('amqplib/callback_api');
+const geoip = require('geoip-lite');
 
 const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
@@ -30,6 +31,8 @@ const SourceType = {
 const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
 };
+
+const CENTROIDS = fs.readFileSync('centroids.json');
 
 const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
@@ -1444,6 +1447,7 @@ const createBlogRegex = '/admin/blog';
 const blogRegex = '/blog';
 const blogDetailRegex = '/blog/(\\S*)';
 const githubLinkRegex = '/github_link';
+const mapRegex = '/map';
 
 // terrible names
 const submitPublishRequestRegex = '/public_publish';
@@ -1658,12 +1662,34 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
     }
 });
 
+// todo: redis one day
+const gameMap = {};
+
+const getCountryByIp = (ip) => {
+    const geo = geoip.lookup(ip);
+    if (geo && geo.country) {
+        return geo.country;
+    }
+
+    return null;
+};
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
     const requestHandlers = {
         'POST': {
+            [mapRegex]: {
+                handle: () => {
+                    console.log('gonna get ip, map to country, then get game id of what theyre playing');
+
+                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+                    const countryCode = getCountryByIp(requesterIp);
+                    console.log('got country data');
+                    console.log(countryCode);
+                }
+            },
             [profileRegex]: {
                 requiresAuth: true,
                 handle: (userId) => {
@@ -2162,6 +2188,15 @@ const server = http.createServer((req, res) => {
             }
         },
         'GET': {
+            [mapRegex]: {
+                handle: () => {
+                    console.log('gonna return in memory value of map');
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json'
+                    });
+                    res.end(JSON.stringify(gameMap));
+                }
+            },
             [certStatusRegex]: {
                 handle: () => {
                     const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
