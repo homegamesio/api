@@ -32,7 +32,8 @@ const poolData = {
     UserPoolId: process.env.COGNITO_USER_POOL_ID
 };
 
-const CENTROIDS = fs.readFileSync('centroids.json');
+const _CENTROIDS = fs.readFileSync('centroids.json');
+const CENTROIDS = JSON.parse(_CENTROIDS);
 
 const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
@@ -152,7 +153,7 @@ const downloadFromGithub = (owner, repo, commit = '') =>
   new Promise((resolve, reject) => {
     const commitString = commit ? "/" + commit : "";
     const thing = `https://codeload.github.com/${owner}/${repo}/zip${commitString}`;
-    downloadZip(thing).then(resolve);
+    downloadZip(thing).then(resolve).catch(reject);
   });
 
 const getMongoClient = () => {
@@ -175,7 +176,7 @@ const getMongoAsset = (assetId) => new Promise((resolve, reject) => {
         const db = client.db(DB_NAME);
         const assetCollection = db.collection('assets');
         assetCollection.findOne({ assetId }).then(resolve).catch(reject);
-    });
+    }).catch(reject);
 });
 
 const createSupportMessage = (body, sourceIp) => new Promise((resolve, reject) => {
@@ -191,10 +192,10 @@ const createSupportMessage = (body, sourceIp) => new Promise((resolve, reject) =
                 const id = generateId();
                 collection.insertOne({ id, created: now, ipHash, 'status': 'PENDING', message: body.message, email: body.email || null }).then(() => {
                     resolve();
-                }); 
+                }).catch(reject); 
             }
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const createBlogPost = (userId, blogPayload) => new Promise((resolve, reject) => {
@@ -203,7 +204,7 @@ const createBlogPost = (userId, blogPayload) => new Promise((resolve, reject) =>
         const db = client.db(DB_NAME);
         const blogCollection = db.collection('blog');
         blogCollection.insertOne({ id: generateId(), publishedBy: userId, created: Date.now(), title: blogPayload.title || '', content: blogPayload.content }).then(resolve).catch(reject);
-    });
+    }).catch(reject);
 });
 
 const getBlogPost = (id) => new Promise((resolve, reject) => {
@@ -243,7 +244,7 @@ const listBlogPosts = (limit, offset, sort, query, includeMostRecent) => new Pro
                     resolve({ posts: posts.map(p => mapBlogPost(p, false)), count });
                 }
             }).catch(reject);
-        });
+        }).catch(reject);
     }).catch(reject);
  
 });
@@ -254,13 +255,13 @@ const getMongoDocument = (assetId) => new Promise((resolve, reject) => {
         const db = client.db(DB_NAME);
         const documentCollection = db.collection('documents');
         documentCollection.findOne({ assetId }).then(resolve).catch(reject);
-    });
+    }).catch(reject);
 });
 
 const getUserRecord = (userId) => new Promise((resolve, reject) => {
     getMongoCollection('users').then(collection => {
         collection.findOne({ userId }).then(resolve).catch(reject);
-    });
+    }).catch(reject);
 });
 
 const login = (request) => new Promise((resolve, reject) => {
@@ -293,10 +294,10 @@ const login = (request) => new Promise((resolve, reject) => {
                     //        token
                     //    });
                     //});
-                });
+                }).catch(reject);
             } 
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const generateJwt = (userId) => {
@@ -335,7 +336,7 @@ const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
                 reject('username already exists');
             }
         });
-    });
+    }).catch(reject);
 });
 
 const signup = (request) => new Promise((resolve, reject) => {
@@ -361,9 +362,9 @@ const submitContentRequest = (request, ip) => new Promise((resolve, reject) => {
 	collection.insertOne({ requestId, created: now }).then(() => {
 	    createContentRequest(messageBody).then(() => {
                 resolve(requestId);
-	    });
+	    }).catch(reject);
         });
-    });
+    }).catch(reject);
 });
 
 const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
@@ -405,7 +406,7 @@ const deleteDnsRecord = (name) => new Promise((resolve, reject) => {
             });
 
         });
-    });
+    }).catch(reject);
 
 });
 
@@ -477,8 +478,8 @@ const uploadMongo = (developerId, assetId, filePath, fileName, fileSize, fileTyp
         collection.findOne({ assetId }).then(asset => {
             const documentCollection = db.collection('documents');
             documentCollection.insertOne({ developerId, assetId, data: new Binary(fs.readFileSync(filePath)), fileSize, fileType }).then(() => resolve(assetId)).catch(reject);
-        });
-    }); 
+        }).catch(reject);
+    }).catch(reject); 
 });
 
 const logSuccess = (funcName) => {
@@ -511,7 +512,7 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
                     description
                 });
         });
-    });
+    }).catch(reject);
 });
 
 const updateGameSearch = (gameData) => new Promise((resolve, reject) => {
@@ -636,16 +637,11 @@ const getMongoCollection = (collectionName) => new Promise((resolve, reject) => 
         const db = client.db(DB_NAME);
         const collection = db.collection(collectionName);
         resolve(collection);
-    });
+    }).catch(reject);
 });
 
 const createProfileImageTask = (userId, assetId) => new Promise((resolve, reject) => {
     amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
-        console.log('erererer');
-        console.log(err);
-        console.log("FJSDFJKSDF");
-        console.log(assetId);
-        console.log(conn);
         if (err) {
             reject(err);
         } else {
@@ -671,13 +667,13 @@ const createProfileImageTask = (userId, assetId) => new Promise((resolve, reject
 const updateMongoProfileInfo = (userId, { description, image }) => new Promise((resolve, reject) => {
     getMongoCollection('users').then(users => {
         users.findOne({ userId }).then((foundUser) => {
-            console.log('fiouffofu');
-            console.log(foundUser);
             if (!foundUser) {
                 reject('User not found');
             } else {
                 if (image) {
-                    createProfileImageTask(userId, image);
+                    createProfileImageTask(userId, image).catch(err => {
+                        console.error(err);
+                    });
                 }
                 if (description && foundUser.description != description) {
                     users.updateOne({ userId }, { "$set": { description } }).catch(reject).then(resolve);
@@ -687,8 +683,8 @@ const updateMongoProfileInfo = (userId, { description, image }) => new Promise((
 
                 resolve();
             }
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
@@ -700,8 +696,8 @@ const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
             } else {
                 resolve(result);
             }
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 
 });
 
@@ -709,8 +705,8 @@ const updatePublishRequestState = (requestId, gameId, sourceInfoHash, newStatus)
     getMongoCollection('publishRequests').then((publishRequests) => {
         publishRequests.updateOne({ requestId }, { "$set": { status: newStatus } }).catch(reject).then(() => {
             resolve();
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 
 });
 
@@ -751,16 +747,20 @@ const getReqBody = (req, cb) => {
 const getGame = (gameId) => new Promise((resolve, reject) => {
     getMongoCollection('games').then(collection => {
         collection.findOne({ gameId }).then(game => {
-            resolve({ 
-                id: game.gameId,
-                description: game.description,
-                name: game.name,
-                created: game.created,
-                developerId: game.developerId,
-                thumbnail: game.thumbnail
-            });
-        });
-    });
+            if (!game) {
+                reject('Game not found');
+            } else {
+                resolve({ 
+                    id: game.gameId,
+                    description: game.description,
+                    name: game.name,
+                    created: game.created,
+                    developerId: game.developerId,
+                    thumbnail: game.thumbnail
+                });
+            }
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const updateGameIndex = (gameId) => new Promise((resolve, reject) => {
@@ -776,10 +776,9 @@ const updateGameIndex = (gameId) => new Promise((resolve, reject) => {
             thumbnail: gameData.thumbnail
         };
         elasticSearchPost('/games/_doc/' + gameId, gameBody).then(() => {
-            console.log('cool!1!jsdfgkfsdg');
             resolve();
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
@@ -807,7 +806,7 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
                         resolve(gameResult);
                     }).catch(reject);
                 });
-            });
+            }).catch(reject);
         }
 
         //if (updateParams.published_state) {
@@ -822,9 +821,6 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
 });
 
 const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((resolve, reject) => {
-    console.log('this is query ' + query);
-    console.log('dfdsfdsf ' + limit);
-    console.log(offset);
     getMongoCollection('assets').then(collection => {
         let dbQuery = { developerId };
         if (query) {
@@ -846,7 +842,7 @@ const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((
             collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
                 resolve({ assets, count });
             }).catch(reject);
-        });
+        }).catch(reject);
     }).catch(reject);
 });
 
@@ -870,8 +866,8 @@ const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
     getMongoCollection('publishRequests').then((collection) => {
         collection.find({ status: 'PENDING_PUBLISH_APPROVAL' }).toArray().then((results) => {
             resolve({ requests: results });
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const adminAcknowledgeMessage = (messageId) => new Promise((resolve, reject) => {
@@ -879,9 +875,11 @@ const adminAcknowledgeMessage = (messageId) => new Promise((resolve, reject) => 
         collection.findOne({ id: messageId }).then(supportMessage => {
             console.log('found message');
             console.log(supportMessage);
-            collection.updateOne({ id: messageId }, { "$set": { 'status': 'ACKNOWLEDGED' } }).then(resolve).catch(reject);
-        });
-    });
+            if (supportMessage) {
+                collection.updateOne({ id: messageId }, { "$set": { 'status': 'ACKNOWLEDGED' } }).then(resolve).catch(reject);
+            }
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const adminListSupportMessages = (page, limit) => new Promise((resolve, reject) => {
@@ -891,8 +889,8 @@ const adminListSupportMessages = (page, limit) => new Promise((resolve, reject) 
     getMongoCollection('supportMessages').then((collection) => {
         collection.find({ status: 'PENDING' }).skip(skip).limit(actualLimit).toArray().then((results) => {
             resolve({ requests: results });
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 
 });
 
@@ -900,8 +898,8 @@ const adminListFailedPublishRequests = () => new Promise((resolve, reject) => {
     getMongoCollection('publishRequests').then((collection) => {
         collection.find({ status: 'FAILED' }).toArray().then((results) => {
             resolve({ requests: results });
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const listPublishRequests = (gameId) => new Promise((resolve, reject) => {
@@ -917,8 +915,8 @@ const listPublishRequests = (gameId) => new Promise((resolve, reject) => {
                     gameVersionId: r.versionId
                 }
             }));
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 
 });
 
@@ -956,7 +954,7 @@ const listPublicGamesForAuthor = (params) => new Promise((resolve, reject) => {
             pageCount
         })
 
-    });
+    }).catch(reject);
 });
 
 const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
@@ -964,8 +962,6 @@ const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolv
     getMongoCollection('games').then(collection => {
         const actualLimit = limit || 10;
         const skip = ( page - 1 ) * actualLimit;
-        console.log("DKKDSFKDSFK NEED TO MOVE THIS ??");
-        console.log(skip);
         collection.find({ developerId: author }).limit(actualLimit).skip(skip).toArray().then(results => {//{ developerId: author }).then(results => {//.skip(skip).limit(actualLimit).then(results => {
            resolve(results.map(r => {
                 return {
@@ -976,8 +972,8 @@ const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolv
                     createdAt: r.createdAt
                 }
            }));
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const getGameDetails = (gameId) => new Promise((resolve, reject) => { 
@@ -1005,11 +1001,11 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 }
                             })
                         });
-                    });
-                });
+                    }).catch(reject);
+                }).catch(reject);
             }
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const assetResponse = (asset) => {
@@ -1228,10 +1224,7 @@ const listGames = (limit = 6, offset = 0, sort = DEFAULT_GAME_ORDER, query = nul
 //        resolve(gamesCache.pages);
 //    } else {
         if (query) {
-            console.log('limit,fdsf ' + offset + ", " + limit);
             search([ELASTICSEARCH_GAME_INDEX], query, Math.max(0, offset), limit).then((results) => {
-                console.log("RUERUESLUE");
-                console.log(results);
                 const totalResults = results.total.value;
                 const pageCount = Math.ceil(totalResults / limit);
                 resolve({
@@ -1240,7 +1233,7 @@ const listGames = (limit = 6, offset = 0, sort = DEFAULT_GAME_ORDER, query = nul
                     total: totalResults,
                 });
 
-            });
+            }).catch(reject);
         } else { 
             console.log('sdjkfsdjkfh ' + limit);
             console.log(ELASTICSEARCH_GAME_INDEX);
@@ -1261,7 +1254,7 @@ const listGames = (limit = 6, offset = 0, sort = DEFAULT_GAME_ORDER, query = nul
                         total: totalResults
                     });
                 }
-            });
+            }).catch(reject);
         }
 //    }
 });
@@ -1312,8 +1305,8 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
         console.log(requestData);
         getMongoCollection('publishRequests').then((publishRequests) => {
             publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => resolve(gameId));
-        });
-    });
+        }).catch(reject);
+    }).catch(reject);
 });
 
 let s3Cache;
@@ -1374,7 +1367,7 @@ const fillS3Cache = () => new Promise((resolve, reject) => {
         getNext(continuationToken).then((data) => {
             allData = allData.concat(data.Contents);
             if (data.continuationToken) {
-                waitUntilDone(data.continuationToken).then(resolve);
+                waitUntilDone(data.continuationToken).then(resolve).catch(reject);
             } else {
                 resolve();
             }
@@ -1665,6 +1658,9 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
 // todo: redis one day
 const gameMap = {};
 
+// hash of ip to timestamp of last n map requests
+const mapRequests = {};
+
 const getCountryByIp = (ip) => {
     const geo = geoip.lookup(ip);
     if (geo && geo.country) {
@@ -1685,10 +1681,70 @@ const server = http.createServer((req, res) => {
                     console.log('gonna get ip, map to country, then get game id of what theyre playing');
 
                     const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-                    const countryCode = getCountryByIp(requesterIp);
-                    console.log('got country data');
-                    console.log(countryCode);
-                }
+		    if (!requesterIp) {
+			// somehow we dont have their ip, just ignore the request
+			res.end('');
+		    } else {
+			getReqBody(req, (_body, err) => {
+				let body;
+				try {
+                        		body = JSON.parse(_body);	
+				} catch (err) {
+					console.error('unable to parse map request');
+					console.error(err);
+				}
+				if (!body || !body.gameId) {
+					res.writeHead(400);
+					res.end('missing game id');
+				} else {
+					const gameId = body.gameId;
+                                        
+                                        getGame(gameId).then(() => {
+		    			
+                                            const ipHash = getHash(requesterIp);
+					    
+					    console.log(mapRequests);
+		    			    if (mapRequests[ipHash]?.length > 4) {
+		    			        // if they have made more than 4 requests, look at the oldest one
+		    			        // if it was made less than a minute ago, ignore the request (silently)
+		    			        if (mapRequests[ipHash][4] > (Date.now() - (1000 * 60))) {
+		    			        	console.log('yeah i dont care lol');
+		    			        	res.end('');
+		    			        }
+		    			        mapRequests[ipHash] = mapRequests[ipHash].slice(0, 4);
+		    			    } else {
+		    			        if (!mapRequests[ipHash]) {
+		    			            mapRequests[ipHash] = [];	
+		    			        }
+		    			        mapRequests[ipHash].unshift(Date.now());
+                    			    	const countryCode = getCountryByIp(requesterIp);
+		    			    	if (countryCode) {
+		    			    		if (!gameMap[countryCode]) {
+					    			gameMap[countryCode] = {};
+					    		}
+
+					    		if (!gameMap[countryCode][gameId]) {
+					    			gameMap[countryCode][gameId] = {};
+					    		}
+
+					    		// todo: every hour or so, expire entries (would need to track ip, timestamp, gameId? maybe not). maybe just say (in the last hour) on site instead of tracking active connections. or maybe we track connections with some token we generate when someone makes a post. clients close with that token as param, we remove active connections. active map is kind of the point!
+					    		const now = Date.now();
+					    		const random = '' + now + Math.random();
+					    		const token = getHash(random);
+					    		gameMap[countryCode][gameId][token] = now;
+					    		res.writeHead(200, {
+					    			'Content-Type': 'application/json'
+					    		});
+					    		res.end(JSON.stringify({token}));
+		    			    	}
+		    			    }
+                                        }).catch(err => {
+                                            res.end(JSON.stringify(err));
+                                        });
+				}
+		    	});
+                	}
+		}
             },
             [profileRegex]: {
                 requiresAuth: true,
@@ -1940,6 +1996,8 @@ const server = http.createServer((req, res) => {
                                         res.end(JSON.stringify(publishRequest));
 
                                     });
+                                }).catch(err => {
+                                    res.end(JSON.stringify(err));
                                 });
                             } else {
                                 res.writeHead(400);
@@ -1972,6 +2030,8 @@ const server = http.createServer((req, res) => {
                                     } else {
                                         getGame(gameId).then((_game) => {
                                             res.end(JSON.stringify(_game));
+                                        }).catch(err => {
+                                            res.end(err.toString());
                                         });
                                     }
                                 }
@@ -2098,6 +2158,8 @@ const server = http.createServer((req, res) => {
                                 });
                             });
                         }
+                    }).catch(err => {
+                        res.end(err.toString());
                     });
                 }
             },
@@ -2145,6 +2207,8 @@ const server = http.createServer((req, res) => {
                                     'Content-Type': 'application/json'
                                 });
                                 res.end(JSON.stringify(tokenPayload));
+                            }).catch(err => {
+                                res.end(err.toString());
                             });
                         }
 
@@ -2163,9 +2227,11 @@ const server = http.createServer((req, res) => {
 
                                         if (reqBody.action === 'approve') {
                                             updateGameIndex(gameId).then(() => {
+                                                res.end('');
+                                            }).catch(err => {
+                                                res.end(err.toString());
                                             });
                                         }
-                                        res.end('approved!');
                                     }).catch(err => {
                                         console.log('error performing publish action');
                                         console.log(err);
@@ -2194,7 +2260,42 @@ const server = http.createServer((req, res) => {
                     res.writeHead(200, {
                         'Content-Type': 'application/json'
                     });
-                    res.end(JSON.stringify(gameMap));
+		    console.log(gameMap);
+		    // [
+		    // {
+		    //  "centroid": geojson,
+		    //  "top": [gameid list],
+		    //  "total": # of active connections 
+		    // }
+		    // ]
+		    const entries = [];
+		    for (let countryCode in gameMap) {
+			    console.log(countryCode);
+			    console.log(Object.keys(CENTROIDS));
+			if (!CENTROIDS[countryCode]) {
+				console.log('skipping country code ' + countryCode + ': no centroid found');
+			} else {
+				const gameCounts = {};
+				let totalSessions = 0;
+				for (let gameKey in gameMap[countryCode]) {
+					gameCounts[gameKey] = Object.keys(gameMap[countryCode][gameKey]).length;
+					totalSessions += gameCounts[gameKey];
+				}
+
+				const sortedGameCounts = Object.keys(gameCounts).sort((a,b) => gameCounts[b] - gameCounts[a]);
+				console.log("SORTED");
+				console.log(sortedGameCounts);
+
+				const entry = {
+					centroid: CENTROIDS[countryCode],
+					// todo: optimize (maybe sort when a put is made, after returning respose to user and before putting it into the list)
+					'top': sortedGameCounts.slice(0, 10),
+					"total": totalSessions
+				}
+				entries.push(entry);
+			}
+		    }
+                    res.end(JSON.stringify(entries));
                 }
             },
             [certStatusRegex]: {
@@ -2209,9 +2310,9 @@ const server = http.createServer((req, res) => {
                                 'Content-Type': 'application/json'
                             }); 
                             body.dnsAlias = dnsRecord;
-				console.log('this is ting');
-				console.log(body);
                             res.end(JSON.stringify(body));
+                        }).catch(err => {
+                            res.end(JSON.stringify(err));
                         });
                     }).catch(err => {
                         // todo: have better status codes. this is only one reason an error would be thrown
@@ -2239,6 +2340,8 @@ const server = http.createServer((req, res) => {
                                 }
                             });
                         }
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 }
             },
@@ -2252,6 +2355,8 @@ const server = http.createServer((req, res) => {
                             'Content-Type': 'application/json'
                         });
                         res.end(JSON.stringify(blogPosts));
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 }
             },
@@ -2281,6 +2386,8 @@ const server = http.createServer((req, res) => {
                     const { limit, offset, sort } = queryObject;
                     getPodcastData(Number(offset || 0), Number(limit || 20), sort || 'desc').then(podcastData => {
                         res.end(JSON.stringify(podcastData));
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 }
             },
@@ -2296,7 +2403,9 @@ const server = http.createServer((req, res) => {
 					res.end(JSON.stringify({ response: req.response || null, createdAt: req.created, requestId }));
 				}
 			});
-		    });
+		    }).catch(err => {
+                        res.end(JSON.stringify(err));
+                    });
                 }
             },
             [listMyGamesRegex]: {
@@ -2317,6 +2426,8 @@ const server = http.createServer((req, res) => {
                         res.end(JSON.stringify(
                             results
                         )); 
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 }
             }, 
@@ -2348,6 +2459,8 @@ const server = http.createServer((req, res) => {
                                 'Content-Type': 'application/json'
                             });
                             res.end(JSON.stringify(results));
+                        }).catch(err => {
+                            res.end(JSON.stringify(err));
                         });
                     }
                 }
@@ -2417,7 +2530,9 @@ const server = http.createServer((req, res) => {
             },
             [devProfileRegex]: {
                 handle: (devId) => {
-                    getProfileInfo(devId).then(data => res.end(JSON.stringify(data)));
+                    getProfileInfo(devId).then(data => res.end(JSON.stringify(data))).catch(err => {
+                        res.end(JSON.stringify(err));
+                    });
                 }
             },
             [profileRegex]: {
@@ -2427,6 +2542,8 @@ const server = http.createServer((req, res) => {
                             'Content-Type': 'application/json'
                         });
                         res.end(JSON.stringify(data));
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 },
                 requiresAuth: true
@@ -2438,6 +2555,8 @@ const server = http.createServer((req, res) => {
                             'Content-Type': 'application/json'
                         });
                         res.end(JSON.stringify(publishRequests));
+                    }).catch(err => {
+                        res.end(JSON.stringify(err));
                     });
                 },
                 requiresAuth: true  
