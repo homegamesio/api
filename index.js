@@ -1,5 +1,6 @@
 const http = require('http');
 const decompress = require('decompress');
+const redis = require('redis');
 const acme = require('acme-client');
 const https = require('https');
 const url = require('url');
@@ -515,7 +516,39 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
+const elasticDeleteGame = (gameId) => new Promise((resolve, reject) => {
+    const options = {
+        hostname: ELASTICSEARCH_HOST,
+        port: ELASTICSEARCH_PORT,
+        path: `/games/_doc/${gameId}`,
+        method: 'DELETE',
+        headers: {}
+    };
+    
+    const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+            data += chunk;
+        });
+
+        res.on('end', () => {
+            const parsed = JSON.parse(data);
+            resolve();
+        });
+    });
+
+    req.on('error', (e) => {
+        console.error(`problem with request: ${e.message}`);
+        reject();
+    });
+
+    req.write('');
+    req.end();
+});
+
 const updateGameSearch = (gameData) => new Promise((resolve, reject) => {
+	console.log("STRINGIFYING");
+	console.log(gameData);
     const body = JSON.stringify(gameData);
     
     const options = {
@@ -984,6 +1017,8 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
+			    console.log("VIERIEIREIRIER");
+			    console.log(versions);
                         resolve({
                             game: {
                                 name: gameResult.name,
@@ -997,7 +1032,9 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 return {
                                     id: v.versionId,
                                     published: v.publishedAt,
-                                    assetId: v.sourceAssetId
+                                    assetId: v.sourceAssetId,
+				    approved: v.approved ? true : false,
+				    squishVersion: v.squishVersion
                                 }
                             })
                         });
@@ -1151,6 +1188,15 @@ const getIndexData = (indexes, limit, offset) => new Promise((resolve, reject) =
 
 	console.log('hfhfhfhf huh ' + ELASTICSEARCH_HOST + ' ::::: ' + ELASTICSEARCH_PORT);
     
+	console.log('what is indexes ' + indexes);
+	try {
+		console.log(indexes);
+	if (!indexes || !indexes.trim()) {
+		indexes = 'games';
+	}} catch (err) {
+		console.warn(err);
+	}
+	console.log('dsjfkhdksjghdfg' + indexes);
     const options = {
         hostname: ELASTICSEARCH_HOST,
         port: ELASTICSEARCH_PORT,
@@ -1304,7 +1350,13 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
         console.log("this is publish request");
         console.log(requestData);
         getMongoCollection('publishRequests').then((publishRequests) => {
-            publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => resolve(gameId));
+            publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => {
+		    getMongoCollection('gameVersions').then(gameVersions => {
+			gameVersions.updateOne({ versionId: requestData.versionId }, { "$set": { approved: newStatus === 'PUBLISHED' } }).then(() => {
+		    		resolve(gameId);
+			});
+		    });
+	    });
         }).catch(reject);
     }).catch(reject);
 });
@@ -1655,11 +1707,54 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
     }
 });
 
-// todo: redis one day
-const gameMap = {};
+let gameMaps = [];
 
 // hash of ip to timestamp of last n map requests
 const mapRequests = {};
+
+const updateCachedMap = () => new Promise((resolve, reject) => {
+	// ["centroid": {}, "totalSessions": x, "top": []]
+	
+	const redisClient = redis.createClient();
+	const finalList = [];
+	const countryMap = {};
+	redisClient.on('connect', () => {
+		redisClient.keys('*', (err, keys) => {//.then((k) => {
+			let i = 0;
+			const ting = () => {
+				if (i < keys.length) {
+					const key = keys[i];
+					redisClient.get(key, (err, _data) => {
+						const data = JSON.parse(_data);
+						if (data.country && CENTROIDS[data.country]) {
+							if (!countryMap[data.country]) {
+								countryMap[data.country] = {
+									total: 0,
+									centroid: CENTROIDS[data.country]
+								};
+							}
+							countryMap[data.country].total = countryMap[data.country].total + 1;
+						}
+						i++;
+						ting();
+					});
+				} else {
+					const entries = [];
+					for (let k in countryMap) {
+						entries.push({ centroid: countryMap[k].centroid, total: countryMap[k].total });
+					}
+					gameMaps = entries;
+					redisClient.end(true);
+				}
+			};
+			ting();
+		});
+	});
+});
+
+setInterval(() => {
+	updateCachedMap();
+}, 1000 * 5);// * 60);
 
 const getCountryByIp = (ip) => {
     const geo = geoip.lookup(ip);
@@ -1670,80 +1765,115 @@ const getCountryByIp = (ip) => {
     return null;
 };
 
+const deleteGame = (gameId) => new Promise((resolve, reject) => {
+	elasticDeleteGame(gameId).then(() => {
+		console.log('deleted game from elastic thing');
+		getMongoCollection('games').then(gameCollection => {
+			console.log('need to delete game from collection');
+			gameCollection.deleteOne({ gameId }).then(() => {
+				console.log('deleted game from db');
+				getMongoCollection('gameVersions').then(gameVersions => {
+					gameCollection.deleteMany({ gameId }).then(() => {
+						console.log('deleted game versions');
+					});
+				});
+			});
+		});
+	});
+
+});
+
 const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
     const requestHandlers = {
+	'DELETE': {
+	    [gameDetailRegex]: {
+                requiresAuth: true,
+                handle: (userId, gameId) => {
+                    getUserRecord(userId).then(userData => {
+                        if (userData.isAdmin) {
+				console.log('wanna delete ' + gameId);
+				deleteGame(gameId).then(() => res.end(''));
+			} else {
+				console.warn(`user ${userId} tried to delete game ${gameId}`);
+				res.end('')
+			}
+		    });
+		}
+	    }
+	},
         'POST': {
             [mapRegex]: {
                 handle: () => {
-                    console.log('gonna get ip, map to country, then get game id of what theyre playing');
-
-                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-		    if (!requesterIp) {
-			// somehow we dont have their ip, just ignore the request
 			res.end('');
-		    } else {
-			getReqBody(req, (_body, err) => {
-				let body;
-				try {
-                        		body = JSON.parse(_body);	
-				} catch (err) {
-					console.error('unable to parse map request');
-					console.error(err);
-				}
-				if (!body || !body.gameId) {
-					res.writeHead(400);
-					res.end('missing game id');
-				} else {
-					const gameId = body.gameId;
-                                        
-                                        getGame(gameId).then(() => {
-		    			
-                                            const ipHash = getHash(requesterIp);
-					    
-					    console.log(mapRequests);
-		    			    if (mapRequests[ipHash]?.length > 4) {
-		    			        // if they have made more than 4 requests, look at the oldest one
-		    			        // if it was made less than a minute ago, ignore the request (silently)
-		    			        if (mapRequests[ipHash][4] > (Date.now() - (1000 * 60))) {
-		    			        	console.log('yeah i dont care lol');
-		    			        	res.end('');
-		    			        }
-		    			        mapRequests[ipHash] = mapRequests[ipHash].slice(0, 4);
-		    			    } else {
-		    			        if (!mapRequests[ipHash]) {
-		    			            mapRequests[ipHash] = [];	
-		    			        }
-		    			        mapRequests[ipHash].unshift(Date.now());
-                    			    	const countryCode = getCountryByIp(requesterIp);
-		    			    	if (countryCode) {
-		    			    		if (!gameMap[countryCode]) {
-					    			gameMap[countryCode] = {};
-					    		}
-
-					    		if (!gameMap[countryCode][gameId]) {
-					    			gameMap[countryCode][gameId] = {};
-					    		}
-
-					    		// todo: every hour or so, expire entries (would need to track ip, timestamp, gameId? maybe not). maybe just say (in the last hour) on site instead of tracking active connections. or maybe we track connections with some token we generate when someone makes a post. clients close with that token as param, we remove active connections. active map is kind of the point!
-					    		const now = Date.now();
-					    		const random = '' + now + Math.random();
-					    		const token = getHash(random);
-					    		gameMap[countryCode][gameId][token] = now;
-					    		res.writeHead(200, {
-					    			'Content-Type': 'application/json'
-					    		});
-					    		res.end(JSON.stringify({token}));
-		    			    	}
-		    			    }
-                                        }).catch(err => {
-                                            res.end(JSON.stringify(err));
-                                        });
-				}
-		    	});
-                	}
+//                    console.log('gonna get ip, map to country, then get game id of what theyre playing');
+//
+//                    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+//		    if (!requesterIp) {
+//			// somehow we dont have their ip, just ignore the request
+//			res.end('');
+//		    } else {
+//			getReqBody(req, (_body, err) => {
+//				let body;
+//				try {
+//                        		body = JSON.parse(_body);	
+//				} catch (err) {
+//					console.error('unable to parse map request');
+//					console.error(err);
+//				}
+//				if (!body || !body.gameId) {
+//					res.writeHead(400);
+//					res.end('missing game id');
+//				} else {
+//					const gameId = body.gameId;
+//                                        
+//                                        getGame(gameId).then(() => {
+//		    			
+//                                            const ipHash = getHash(requesterIp);
+//					    
+//					    console.log(mapRequests);
+//		    			    if (mapRequests[ipHash]?.length > 4) {
+//		    			        // if they have made more than 4 requests, look at the oldest one
+//		    			        // if it was made less than a minute ago, ignore the request (silently)
+//		    			        if (mapRequests[ipHash][4] > (Date.now() - (1000 * 60))) {
+//		    			        	console.log('yeah i dont care lol');
+//		    			        	res.end('');
+//		    			        }
+//		    			        mapRequests[ipHash] = mapRequests[ipHash].slice(0, 4);
+//		    			    } else {
+//		    			        if (!mapRequests[ipHash]) {
+//		    			            mapRequests[ipHash] = [];	
+//		    			        }
+//		    			        mapRequests[ipHash].unshift(Date.now());
+//                    			    	const countryCode = getCountryByIp(requesterIp);
+//		    			    	if (countryCode) {
+//		    			    		if (!gameMap[countryCode]) {
+//					    			gameMap[countryCode] = {};
+//					    		}
+//
+//					    		if (!gameMap[countryCode][gameId]) {
+//					    			gameMap[countryCode][gameId] = {};
+//					    		}
+//
+//					    		// todo: every hour or so, expire entries (would need to track ip, timestamp, gameId? maybe not). maybe just say (in the last hour) on site instead of tracking active connections. or maybe we track connections with some token we generate when someone makes a post. clients close with that token as param, we remove active connections. active map is kind of the point!
+//					    		const now = Date.now();
+//					    		const random = '' + now + Math.random();
+//					    		const token = getHash(random);
+//					    		gameMap[countryCode][gameId][token] = now;
+//					    		res.writeHead(200, {
+//					    			'Content-Type': 'application/json'
+//					    		});
+//					    		res.end(JSON.stringify({token}));
+//		    			    	}
+//		    			    }
+//                                        }).catch(err => {
+//                                            res.end(JSON.stringify(err));
+//                                        });
+//				}
+//		    	});
+//                	}
 		}
             },
             [profileRegex]: {
@@ -2061,6 +2191,7 @@ const server = http.createServer((req, res) => {
                             // not sure what to put here (if anything) yet. maybe model-specific config / safeguards
                         }
                     };
+
                     const supportedServices = {
                         'content-generation': {
                             validator: (data) => {
@@ -2105,6 +2236,9 @@ const server = http.createServer((req, res) => {
                     };
 
                     getReqBody(req, (_data) => {
+
+			console.log('dsfdsf');
+			    console.log(_data);
                         const data = JSON.parse(_data);
                         const validationErr = validateServiceRequest(data);
                         if (validationErr) {
@@ -2260,7 +2394,6 @@ const server = http.createServer((req, res) => {
                     res.writeHead(200, {
                         'Content-Type': 'application/json'
                     });
-		    console.log(gameMap);
 		    // [
 		    // {
 		    //  "centroid": geojson,
@@ -2268,34 +2401,34 @@ const server = http.createServer((req, res) => {
 		    //  "total": # of active connections 
 		    // }
 		    // ]
-		    const entries = [];
-		    for (let countryCode in gameMap) {
-			    console.log(countryCode);
-			    console.log(Object.keys(CENTROIDS));
-			if (!CENTROIDS[countryCode]) {
-				console.log('skipping country code ' + countryCode + ': no centroid found');
-			} else {
-				const gameCounts = {};
-				let totalSessions = 0;
-				for (let gameKey in gameMap[countryCode]) {
-					gameCounts[gameKey] = Object.keys(gameMap[countryCode][gameKey]).length;
-					totalSessions += gameCounts[gameKey];
-				}
+		    //const entries = [];
+		    //for (let countryCode in gameMap) {
+		    //        console.log(countryCode);
+		    //        console.log(Object.keys(CENTROIDS));
+		    //    if (!CENTROIDS[countryCode]) {
+		    //    	console.log('skipping country code ' + countryCode + ': no centroid found');
+		    //    } else {
+		    //    	const gameCounts = {};
+		    //    	let totalSessions = 0;
+		    //    	for (let gameKey in gameMap[countryCode]) {
+		    //    		gameCounts[gameKey] = Object.keys(gameMap[countryCode][gameKey]).length;
+		    //    		totalSessions += gameCounts[gameKey];
+		    //    	}
 
-				const sortedGameCounts = Object.keys(gameCounts).sort((a,b) => gameCounts[b] - gameCounts[a]);
-				console.log("SORTED");
-				console.log(sortedGameCounts);
+		    //    	const sortedGameCounts = Object.keys(gameCounts).sort((a,b) => gameCounts[b] - gameCounts[a]);
+		    //    	console.log("SORTED");
+		    //    	console.log(sortedGameCounts);
 
-				const entry = {
-					centroid: CENTROIDS[countryCode],
-					// todo: optimize (maybe sort when a put is made, after returning respose to user and before putting it into the list)
-					'top': sortedGameCounts.slice(0, 10),
-					"total": totalSessions
-				}
-				entries.push(entry);
-			}
-		    }
-                    res.end(JSON.stringify(entries));
+		    //    	const entry = {
+		    //    		centroid: CENTROIDS[countryCode],
+		    //    		// todo: optimize (maybe sort when a put is made, after returning respose to user and before putting it into the list)
+		    //    		'top': sortedGameCounts.slice(0, 10),
+		    //    		"total": totalSessions
+		    //    	}
+		    //    	entries.push(entry);
+		    //    }
+		    //}
+                    res.end(JSON.stringify(gameMaps));
                 }
             },
             [certStatusRegex]: {
@@ -2330,8 +2463,9 @@ const server = http.createServer((req, res) => {
                         } else {
                             getMongoDocument(assetId).then((documentData) => {
                                 if (documentData) {
+					console.log("JDSFJDSJFDSF");
                                     res.writeHead(200, {
-                                        'Content-Disposition': `inline; filename=${assetData.name}`,
+                                        'Content-Disposition': `inline; filename=${encodeURI(assetData.name)}`
                                     });
                                     res.end(documentData.data.buffer);
                                 } else {
@@ -2488,8 +2622,9 @@ const server = http.createServer((req, res) => {
             [gameVersionDetailRegex]: {
                 handle: (gameId, versionId) => {
                     getGameDetails(gameId).then(data => {
-                        const foundVersion = data.versions.find(v => v.versionId === versionId);
+                        const foundVersion = data.versions.find(v => v.id === versionId);
                         if (!foundVersion) {
+			    res.writeHead(404);
                             res.end('Version not found');
                         } else {
                             res.end(JSON.stringify(foundVersion));
