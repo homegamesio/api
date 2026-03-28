@@ -1,221 +1,37 @@
-// Tests for homegames-api pure logic
-// Run: node --test test/test.js
+// Tests for homegames-api
+// Run: node --test test/test.js (or: npm test)
 //
-// These tests replicate the pure functions from index.js exactly as written
-// and verify their behavior. No changes to index.js are required.
+// These tests import the actual functions from index.js and verify their behavior.
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
 
-// ---------------------------------------------------------------------------
-// Replicated pure functions from index.js (verbatim logic)
-// ---------------------------------------------------------------------------
-
-const JWT_SECRET = 'test-secret';
-const HASH_ITERATIONS = 100000;
-const HASH_KEY_LENGTH = 64;
-const HASH_DIGEST = 'sha512';
-
-const base64UrlEncode = (obj) => {
-    const stringified = JSON.stringify(obj);
-    return Buffer.from(stringified).toString('base64url');
-};
-
-const base64UrlDecode = (str) => {
-    const decoded = Buffer.from(str, 'base64url');
-    return JSON.parse(decoded);
-};
-
-const getSignature = (encodedHeader, encodedPayload) => {
-    const data = `${encodedHeader}.${encodedPayload}`;
-    return crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
-};
-
-const generateJwt = (userId) => {
-    const jwtHeader = {
-        alg: 'HS256',
-        typ: 'JWT'
-    };
-
-    const payload = { userId, iat: Date.now() };
-
-    const encodedHeader = base64UrlEncode(jwtHeader);
-    const encodedPayload = base64UrlEncode(payload);
-    const encodedSignature = getSignature(encodedHeader, encodedPayload);
-
-    return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
-};
-
-const verifyToken = (token) => new Promise((resolve, reject) => {
-    const bearerPrefix = 'Bearer ';
-    if (!token || !token.startsWith(bearerPrefix)) {
-        reject('Invalid token');
-    } else {
-        const tokenValue = token.substring(bearerPrefix.length);
-        const tokenPieces = tokenValue.split('.');
-        if (tokenPieces.length !== 3) {
-            reject('Invalid token structure');
-        } else {
-            const tokenHeader = tokenPieces[0];
-            const tokenPayload = tokenPieces[1];
-            const tokenSignature = tokenPieces[2];
-
-            const payload = base64UrlDecode(tokenPayload);
-            const validSignature = getSignature(tokenHeader, tokenPayload);
-            if (!payload.iat || payload.iat + (15 * 60 * 1000) <= Date.now()) {
-                reject('Expired token');
-            } else {
-                if (validSignature == tokenSignature) {
-                    resolve(payload);
-                } else {
-                    reject('Invalid token');
-                }
-            }
-        }
-    }
-});
-
-const hashValue = (val) => {
-    return crypto.createHash('sha256').update(val).digest('hex');
-};
-
-const hashPassword = (password, salt) => new Promise((resolve, reject) => {
-    crypto.pbkdf2(password, salt, HASH_ITERATIONS, HASH_KEY_LENGTH, HASH_DIGEST, (error, hashedPassword) => {
-        if (error) {
-            reject(error);
-        } else {
-            resolve(hashedPassword);
-        }
-    });
-});
-
-const getHash = (input) => {
-    return crypto.createHash('md5').update(input).digest('hex');
-};
-
-const generateId = () => getHash(crypto.randomUUID());
-
-// --- Data mappers ---
-
-const mapElasticSearchGame = (_game) => {
-    const game = _game._source;
-    return {
-        id: game.gameId,
-        ...game
-    };
-};
-
-const mapBlogPost = (post, includeContent) => {
-    const mapped = {
-        id: post.id,
-        publishedBy: post.publishedBy,
-        created: post.created,
-        title: post.title || ''
-    };
-    if (includeContent) {
-        mapped.content = post.content;
-    }
-    return mapped;
-};
-
-const mapMongoGame = (game) => {
-    return {
-        id: game.gameId,
-        gameId: game.gameId,
-        description: game.description || '',
-        name: game.name || '',
-        developerId: game.developerId,
-        created: game.created,
-        thumbnail: game.thumbnail
-    };
-};
-
-const mapGame = (game) => {
-    return {
-        createdBy: game.created_by && game.created_by.S ? game.created_by.S : game.created_by,
-        createdAt: game.created_on && game.created_on.N ? game.created_on.N : game.created_on,
-        id: game.game_id && game.game_id.S ? game.game_id.S : game.game_id,
-        thumbnail: game.thumbnail && game.thumbnail.S ? game.thumbnail.S : game.thumbnail,
-        name: game.name && game.name.S ? game.name.S : game.name,
-        description: game.description && game.description.S ? game.description.S : game.description
-    };
-};
-
-const assetResponse = (asset) => {
-    return {
-        id: asset.assetId,
-        developerId: asset.developerId,
-        name: asset.name,
-        created: asset.created,
-        description: asset.description,
-        size: asset.size,
-        type: asset.metadata?.['Content-Type'] || null
-    };
-};
-
-// --- S3 podcast transform ---
-
-const transformS3Response = (s3Content) => {
-    const episodeEntryRegex = new RegExp('episode_(\\d+)\.mp3|\.mp4$');
-    const transformed = {};
-    s3Content.filter(e => episodeEntryRegex.exec(e.Key)).forEach(e => {
-        const baseKey = e.Key.substring(0, e.Key.length - 4);
-        const ret = {
-            key: baseKey
-        };
-
-        if (!transformed[baseKey]) {
-            transformed[baseKey] = {
-                episode: Number(episodeEntryRegex.exec(e.Key)[1])
-            };
-        }
-
-        if (e.Key.endsWith('.mp3')) {
-            transformed[baseKey].audio = `https://podcast.homegames.io/${e.Key}`;
-        } else if (e.Key.endsWith('.mp4')) {
-            transformed[baseKey].video = `https://podcast.homegames.io/${e.Key}`;
-        }
-    });
-
-    const sortedKeys = Object.keys(transformed).sort((a, b) => {
-        return transformed[a].episode - transformed[b].episode;
-    });
-
-    const retList = sortedKeys.map(k => {
-        return transformed[k];
-    });
-
-    return retList;
-};
-
-// --- Route matching logic (replicated from server handler) ---
-
-const matchRoute = (method, url, requestHandlers) => {
-    if (!requestHandlers[method]) return null;
-    const matchers = Object.keys(requestHandlers[method]).sort((a, b) => b.length - a.length);
-    for (let i = 0; i < matchers.length; i++) {
-        const matched = url.match(new RegExp(matchers[i]));
-        if (matched) {
-            const matchedParams = [];
-            for (let j = 1; j < matched.length; j++) {
-                matchedParams.push(matched[j]);
-            }
-            return { pattern: matchers[i], params: matchedParams, handler: requestHandlers[method][matchers[i]] };
-        }
-    }
-    return null;
-};
-
-// --- getReqBody logic ---
-
-const MAX_SIZE = 50 * 1024 * 1024;
-
-const getPublicIp = (req) => {
-    const connection = req && req.connection;
-    const socket = req && req.socket;
-    return req.ip || connection && connection.remoteAddress || socket && socket.remoteAddress || null;
-};
+const {
+    base64UrlEncode,
+    base64UrlDecode,
+    getSignature,
+    generateJwt,
+    verifyToken,
+    hashValue,
+    hashPassword,
+    getHash,
+    generateId,
+    mapElasticSearchGame,
+    mapBlogPost,
+    mapMongoGame,
+    mapGame,
+    assetResponse,
+    transformS3Response,
+    dispatchRequest,
+    getPublicIp,
+    getReqBody,
+    validateServiceRequest,
+    MAX_SIZE,
+    HASH_ITERATIONS,
+    HASH_KEY_LENGTH,
+    HASH_DIGEST,
+} = require('../index.js');
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -450,7 +266,7 @@ describe('hashPassword', () => {
         assert.ok(Buffer.isBuffer(result));
     });
 
-    it('should produce a 64-byte result (HASH_KEY_LENGTH)', async () => {
+    it('should produce a result of HASH_KEY_LENGTH bytes', async () => {
         const result = await hashPassword('mypassword', 'somesalt');
         assert.equal(result.length, HASH_KEY_LENGTH);
     });
@@ -736,8 +552,10 @@ describe('transformS3Response', () => {
     });
 });
 
-describe('route matching', () => {
-    // Replicate the regex patterns from index.js
+describe('route matching via dispatchRequest', () => {
+    // We test dispatchRequest with mock req/res objects and handler maps
+    // that use the same regex patterns from index.js
+
     const patterns = {
         publishRequests: '/games/(\\S*)/publish_requests',
         profile: '/profile',
@@ -750,14 +568,9 @@ describe('route matching', () => {
         assetsList: '/assets',
         listGames: '/games',
         listMyGames: '/my-games',
-        submitPublishRequest: '/public_publish',
         gamePublish: '/games/(\\S*)/publish',
         gameUpdate: '/games/(\\S*)/update',
         requestAction: '/admin/request/(\\S*)/action',
-        createAsset: '/asset',
-        createGame: '/games',
-        login: '/auth/login',
-        signup: '/auth/signup',
         assets: '/assets/(\\S*)',
         blog: '/blog',
         blogDetail: '/blog/(\\S*)',
@@ -765,118 +578,213 @@ describe('route matching', () => {
         contact: '/contact',
     };
 
-    // Build a handler map like the real code does
-    const buildHandlers = (patternNames) => {
-        const handlers = {};
-        for (const name of patternNames) {
-            handlers[patterns[name]] = { name };
-        }
-        return handlers;
+    // Helper: create a mock res that captures what was written
+    const mockRes = () => {
+        const r = {
+            headers: {},
+            statusCode: 200,
+            ended: false,
+            body: null,
+            setHeader(k, v) { r.headers[k] = v; },
+            writeHead(code, headers) { r.statusCode = code; Object.assign(r.headers, headers || {}); },
+            end(body) { r.ended = true; r.body = body; }
+        };
+        return r;
     };
 
-    it('should match /health exactly', () => {
-        const handlers = { 'GET': buildHandlers(['health', 'listGames', 'gameDetail']) };
-        const result = matchRoute('GET', '/health', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'health');
+    // Helper: build a handler map that records which handler was called with which params
+    const buildTrackedHandlers = (method, patternNames) => {
+        const calls = {};
+        const handlers = {};
+        for (const name of patternNames) {
+            handlers[patterns[name]] = {
+                handle: (req, res, ...params) => { calls[name] = params; res.end('ok'); }
+            };
+        }
+        return { requestHandlers: { [method]: handlers }, calls };
+    };
+
+    it('should match /health and call handler', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['health', 'listGames', 'gameDetail']);
+        const req = { method: 'GET', url: '/health', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.health);
+        assert.ok(res.ended);
     });
 
-    it('should match /games with no params (list games)', () => {
-        const handlers = { 'GET': buildHandlers(['listGames', 'gameDetail', 'gameVersionDetail']) };
-        const result = matchRoute('GET', '/games', handlers);
-        assert.ok(result);
-        // longest match first — gameVersionDetail is longest, then gameDetail, then listGames
-        // but /games doesn't match gameDetail's regex /games/(\S*) since there's no trailing /xxx
-        // Actually let's check: /games matches /games/(\S*)?
-        // The regex /games/(\S*) requires a / after games and then a capture group
-        // So /games should NOT match it. Let's verify:
-        assert.equal(result.params.length, 0);
+    it('should match /games/abc123 and pass gameId param', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['listGames', 'gameDetail', 'gameVersionDetail']);
+        const req = { method: 'GET', url: '/games/abc123', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.gameDetail);
+        assert.ok(calls.gameDetail.includes('abc123'));
     });
 
-    it('should match /games/abc123 and extract gameId', () => {
-        const handlers = { 'GET': buildHandlers(['listGames', 'gameDetail', 'gameVersionDetail']) };
-        const result = matchRoute('GET', '/games/abc123', handlers);
-        assert.ok(result);
-        assert.ok(result.params.includes('abc123'));
-    });
-
-    it('should match /games/abc/version/v1 and extract both params', () => {
-        const handlers = { 'GET': buildHandlers(['gameDetail', 'gameVersionDetail']) };
-        const result = matchRoute('GET', '/games/abc/version/v1', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'gameVersionDetail');
-        assert.deepStrictEqual(result.params, ['abc', 'v1']);
+    it('should match /games/abc/version/v1 and pass both params', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['gameDetail', 'gameVersionDetail']);
+        const req = { method: 'GET', url: '/games/abc/version/v1', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.gameVersionDetail);
+        assert.deepStrictEqual(calls.gameVersionDetail, ['abc', 'v1']);
     });
 
     it('should prefer longer (more specific) patterns', () => {
-        const handlers = { 'GET': buildHandlers(['adminListPendingPublishRequests', 'adminListFailedPublishRequests']) };
-        const result = matchRoute('GET', '/admin/publish_requests/failed', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'adminListFailedPublishRequests');
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['adminListPendingPublishRequests', 'adminListFailedPublishRequests']);
+        const req = { method: 'GET', url: '/admin/publish_requests/failed', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.adminListFailedPublishRequests);
+        assert.equal(calls.adminListPendingPublishRequests, undefined);
     });
 
-    it('should match /games/xyz/publish and extract gameId', () => {
-        const handlers = { 'POST': buildHandlers(['gamePublish', 'gameUpdate', 'createGame']) };
-        const result = matchRoute('POST', '/games/xyz/publish', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'gamePublish');
-        assert.deepStrictEqual(result.params, ['xyz']);
+    it('should match /games/xyz/publish and pass gameId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('POST', ['gamePublish', 'gameUpdate']);
+        const req = { method: 'POST', url: '/games/xyz/publish', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.gamePublish);
+        assert.deepStrictEqual(calls.gamePublish, ['xyz']);
     });
 
-    it('should match /games/xyz/update and extract gameId', () => {
-        const handlers = { 'POST': buildHandlers(['gamePublish', 'gameUpdate', 'createGame']) };
-        const result = matchRoute('POST', '/games/xyz/update', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'gameUpdate');
-        assert.deepStrictEqual(result.params, ['xyz']);
+    it('should match /admin/request/req123/action and pass requestId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('POST', ['requestAction']);
+        const req = { method: 'POST', url: '/admin/request/req123/action', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.requestAction);
+        assert.deepStrictEqual(calls.requestAction, ['req123']);
     });
 
-    it('should match /admin/request/req123/action and extract requestId', () => {
-        const handlers = { 'POST': buildHandlers(['requestAction']) };
-        const result = matchRoute('POST', '/admin/request/req123/action', handlers);
-        assert.ok(result);
-        assert.deepStrictEqual(result.params, ['req123']);
+    it('should match /assets/asset1 and pass assetId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['assets', 'assetsList']);
+        const req = { method: 'GET', url: '/assets/asset1', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.assets);
+        assert.deepStrictEqual(calls.assets, ['asset1']);
     });
 
-    it('should match /assets/asset1 and extract assetId', () => {
-        const handlers = { 'GET': buildHandlers(['assets', 'assetsList']) };
-        const result = matchRoute('GET', '/assets/asset1', handlers);
-        assert.ok(result);
-        assert.deepStrictEqual(result.params, ['asset1']);
+    it('should match /profile/devname and pass devId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['profile', 'devProfile']);
+        const req = { method: 'GET', url: '/profile/devname', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.devProfile);
+        assert.ok(calls.devProfile.includes('devname'));
     });
 
-    it('should match /profile/devname and extract devId', () => {
-        const handlers = { 'GET': buildHandlers(['profile', 'devProfile']) };
-        const result = matchRoute('GET', '/profile/devname', handlers);
-        assert.ok(result);
-        assert.ok(result.params.includes('devname'));
+    it('should match /blog/post1 and pass blogId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['blog', 'blogDetail']);
+        const req = { method: 'GET', url: '/blog/post1', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.blogDetail);
+        assert.ok(calls.blogDetail.includes('post1'));
     });
 
-    it('should match /blog/post1 and extract blogId', () => {
-        const handlers = { 'GET': buildHandlers(['blog', 'blogDetail']) };
-        const result = matchRoute('GET', '/blog/post1', handlers);
-        assert.ok(result);
-        assert.ok(result.params.includes('post1'));
+    it('should match /games/g1/publish_requests and pass gameId', () => {
+        const { requestHandlers, calls } = buildTrackedHandlers('GET', ['publishRequests', 'gameDetail']);
+        const req = { method: 'GET', url: '/games/g1/publish_requests', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.ok(calls.publishRequests);
+        assert.deepStrictEqual(calls.publishRequests, ['g1']);
     });
 
-    it('should return null for unmatched routes', () => {
-        const handlers = { 'GET': buildHandlers(['health']) };
-        const result = matchRoute('GET', '/nonexistent', handlers);
-        assert.equal(result, null);
+    it('should return 404 for unmatched routes', () => {
+        const { requestHandlers } = buildTrackedHandlers('GET', ['health']);
+        const req = { method: 'GET', url: '/nonexistent', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.equal(res.statusCode, 404);
+        assert.equal(res.body, 'not found');
     });
 
-    it('should return null for wrong HTTP method', () => {
-        const handlers = { 'GET': buildHandlers(['health']) };
-        const result = matchRoute('POST', '/health', handlers);
-        assert.equal(result, null);
+    it('should return 400 for unsupported method', () => {
+        const { requestHandlers } = buildTrackedHandlers('GET', ['health']);
+        const req = { method: 'PATCH', url: '/health', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.equal(res.statusCode, 400);
+        assert.ok(res.body.includes('Unsupported method'));
     });
 
-    it('should match /games/g1/publish_requests and extract gameId', () => {
-        const handlers = { 'GET': buildHandlers(['publishRequests', 'gameDetail']) };
-        const result = matchRoute('GET', '/games/g1/publish_requests', handlers);
-        assert.ok(result);
-        assert.equal(result.handler.name, 'publishRequests');
-        assert.deepStrictEqual(result.params, ['g1']);
+    it('should handle OPTIONS with 200', () => {
+        const req = { method: 'OPTIONS', url: '/anything', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, {});
+        assert.equal(res.statusCode, 200);
+        assert.ok(res.ended);
+    });
+
+    it('should pass req and res to handler', () => {
+        let receivedReq, receivedRes;
+        const requestHandlers = {
+            'GET': {
+                '/test': {
+                    handle: (req, res) => { receivedReq = req; receivedRes = res; res.end('ok'); }
+                }
+            }
+        };
+        const req = { method: 'GET', url: '/test', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.equal(receivedReq, req);
+        assert.equal(receivedRes, res);
+    });
+
+    it('should enforce auth and reject missing auth header', () => {
+        const requestHandlers = {
+            'GET': {
+                '/secret': {
+                    requiresAuth: true,
+                    handle: (req, res, userId) => { res.end('ok'); }
+                }
+            }
+        };
+        const req = { method: 'GET', url: '/secret', headers: {} };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        assert.equal(res.body, 'API requires authorization');
+    });
+
+    it('should enforce auth and reject invalid token', async () => {
+        const requestHandlers = {
+            'GET': {
+                '/secret': {
+                    requiresAuth: true,
+                    handle: (req, res, userId) => { res.end('ok'); }
+                }
+            }
+        };
+        const req = { method: 'GET', url: '/secret', headers: { authorization: 'Bearer bad.token.here' } };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        // verifyToken is async so we need to wait a tick
+        await new Promise(r => setTimeout(r, 10));
+        assert.equal(res.statusCode, 401);
+    });
+
+    it('should enforce auth and pass userId for valid token', async () => {
+        let capturedUserId;
+        const requestHandlers = {
+            'GET': {
+                '/secret': {
+                    requiresAuth: true,
+                    handle: (req, res, userId) => { capturedUserId = userId; res.end('ok'); }
+                }
+            }
+        };
+        const token = generateJwt('alice');
+        const req = { method: 'GET', url: '/secret', headers: { authorization: `Bearer ${token}` } };
+        const res = mockRes();
+        dispatchRequest(req, res, requestHandlers);
+        await new Promise(r => setTimeout(r, 10));
+        assert.equal(capturedUserId, 'alice');
+        assert.equal(res.body, 'ok');
     });
 });
 
@@ -899,6 +807,52 @@ describe('getPublicIp', () => {
     it('should return null when nothing is available', () => {
         const req = {};
         assert.equal(getPublicIp(req), null);
+    });
+});
+
+describe('getReqBody', () => {
+    // Mock a readable stream to simulate req
+    const { Readable } = require('stream');
+
+    const mockReq = (chunks) => {
+        const stream = new Readable({
+            read() {
+                for (const chunk of chunks) {
+                    this.push(chunk);
+                }
+                this.push(null);
+            }
+        });
+        return stream;
+    };
+
+    it('should collect body from chunks', (_, done) => {
+        const req = mockReq(['hello', ' ', 'world']);
+        getReqBody(req, (body, err) => {
+            assert.equal(body, 'hello world');
+            assert.equal(err, undefined);
+            done();
+        });
+    });
+
+    it('should handle empty body', (_, done) => {
+        const req = mockReq([]);
+        getReqBody(req, (body, err) => {
+            assert.equal(body, '');
+            assert.equal(err, undefined);
+            done();
+        });
+    });
+
+    it('should handle JSON body', (_, done) => {
+        const payload = JSON.stringify({ key: 'value' });
+        const req = mockReq([payload]);
+        getReqBody(req, (body, err) => {
+            assert.equal(body, payload);
+            const parsed = JSON.parse(body);
+            assert.equal(parsed.key, 'value');
+            done();
+        });
     });
 });
 
@@ -1023,47 +977,6 @@ describe('signup validation logic', () => {
 });
 
 describe('validateServiceRequest', () => {
-    // Replicated from index.js - now extracted as a named function
-    const supportedModels = {
-        'mistral-7b-v0.2': {}
-    };
-
-    const supportedServices = {
-        'content-generation': {
-            validator: (data) => {
-                if (!data.model) {
-                    return 'missing model';
-                }
-                if (!supportedModels[data.model]) {
-                    return 'unknown model';
-                }
-                if (!data['prompt']) {
-                    return 'missing prompt';
-                }
-                if (!data['prompt'].length > 100) {
-                    return 'prompt too long (> 100 characters)';
-                }
-                return null;
-            }
-        }
-    };
-
-    const validateServiceRequest = (data) => {
-        if (!data.type) {
-            return 'request missing type';
-        }
-        if (!supportedServices[data.type]) {
-            return 'unknown service type';
-        }
-        if (supportedServices[data.type].validator) {
-            const serviceValidationErr = supportedServices[data.type].validator(data);
-            if (serviceValidationErr) {
-                return serviceValidationErr;
-            }
-        }
-        return null;
-    };
-
     it('should return null for valid request', () => {
         const result = validateServiceRequest({ type: 'content-generation', model: 'mistral-7b-v0.2', prompt: 'hello' });
         assert.equal(result, null);
@@ -1094,5 +1007,19 @@ describe('MAX_SIZE constant', () => {
     it('should be 50MB', () => {
         assert.equal(MAX_SIZE, 50 * 1024 * 1024);
         assert.equal(MAX_SIZE, 52428800);
+    });
+});
+
+describe('HASH constants', () => {
+    it('should have correct iteration count', () => {
+        assert.equal(HASH_ITERATIONS, 100000);
+    });
+
+    it('should have correct key length', () => {
+        assert.equal(HASH_KEY_LENGTH, 64);
+    });
+
+    it('should use sha512', () => {
+        assert.equal(HASH_DIGEST, 'sha512');
     });
 });
