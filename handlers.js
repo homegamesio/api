@@ -415,6 +415,7 @@ const handleCreateBlog = (req, res, userId) => {
 };
 
 const handleSignup = (req, res) => {
+    console.log('hmmmm');
     getReqBody(req, (_data) => {
         let signupBody = {};
         let err = false;

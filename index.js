@@ -7,6 +7,7 @@ const cryptoUtils = require('./crypto');
 const models = require('./models');
 const { dispatchRequest, buildRequestHandlers } = require('./router');
 const handlers = require('./handlers');
+const studioHandlers = require('./studio-handlers');
 const { updateCachedMap, getReqBody, getPublicIp, validateServiceRequest } = require('./helpers');
 
 // ---------------------------------------------------------------------------
@@ -17,7 +18,7 @@ const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
-    const requestHandlers = buildRequestHandlers(handlers);
+    const requestHandlers = buildRequestHandlers(handlers, studioHandlers);
     dispatchRequest(req, res, requestHandlers);
 });
 

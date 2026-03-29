@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { AUTH_TYPE } = require('./config');
 const { generateJwt, hashPassword } = require('./crypto');
 const { getMongoCollection } = require('./db');
+const { createForgejoUser } = require('./forgejo');
 
 const login = (request) => new Promise((resolve, reject) => {
     const { username, password } = request;
@@ -34,8 +35,10 @@ const login = (request) => new Promise((resolve, reject) => {
 });
 
 const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
+    console.log('adfjksdf');
     const client = require('./db').getMongoClient();
     const { DB_NAME } = require('./config');
+    console.log('sdnjkfsdkjf');
     client.connect().then(() => {
         const db = client.db(DB_NAME);
         const collection = db.collection('users');
@@ -43,13 +46,28 @@ const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
             if (userResponse == null) {
                 const passwordSalt = crypto.randomBytes(16).toString('hex');
                 hashPassword(password, passwordSalt).then((passwordHash) => {
-                    collection.insertOne({ userId, passwordHash, passwordSalt, created: Date.now() }).then(() => {
-                        const token = generateJwt(userId);
-                        resolve({
+                    const finishSignup = (forgejoAccountCreated) => {
+                        collection.insertOne({
                             userId,
-                            token
+                            passwordHash,
+                            passwordSalt,
+                            created: Date.now(),
+                            forgejoAccountCreated: forgejoAccountCreated || false,
+                        }).then(() => {
+                            const token = generateJwt(userId);
+                            resolve({ userId, token });
                         });
-                    });
+                    };
+
+                    const forgejoEmail = `${userId}@homegames.local`;
+                    const forgejoPass = crypto.randomBytes(32).toString('hex');
+
+                    createForgejoUser(userId, forgejoEmail, forgejoPass)
+                        .then(() => finishSignup(true))
+                        .catch(err => {
+                            console.error('Failed to create Forgejo user, continuing without it', err);
+                            finishSignup(false);
+                        });
                 });
             } else {
                 reject('username already exists');
