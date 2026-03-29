@@ -44,6 +44,20 @@ const certRequestRegex = '/request-cert';
 const certStatusRegex = '/cert-status';
 const assetsRegex = '/assets/(\\S*)';
 
+// Studio routes
+const studioCreateGameRegex = '/studio/games';
+const studioListGamesRegex = '/studio/games';
+const studioGetFilesRegex = '/studio/games/(\\S*)/files';
+const studioGetFileContentRegex = '/studio/games/(\\S*)/file';
+const studioSaveVersionRegex = '/studio/games/(\\S*)/save';
+const studioGetVersionsRegex = '/studio/games/(\\S*)/versions';
+const studioGetVersionFilesRegex = '/studio/games/(\\S*)/versions/(\\S*)/files';
+const studioRestoreVersionRegex = '/studio/games/(\\S*)/restore';
+const studioGetCloneInfoRegex = '/studio/games/(\\S*)/clone';
+const studioGetBuildsRegex = '/studio/games/(\\S*)/builds';
+const webhookPushRegex = '/webhook/push';
+const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
+
 const dispatchRequest = (req, res, requestHandlers) => {
     if (req.method === 'OPTIONS') {
         res.writeHead(200);
@@ -63,6 +77,8 @@ const dispatchRequest = (req, res, requestHandlers) => {
                     matchedParams.push(matched[j]);
                 }
                 const handlerInfo = requestHandlers[req.method][matchers[i]];
+                console.log('wat');
+                console.log(handlerInfo);
 
                 if (handlerInfo.requiresAuth) {
                     const authHeader = req.headers.authorization;
@@ -70,6 +86,7 @@ const dispatchRequest = (req, res, requestHandlers) => {
                     if (!authHeader) {
                         res.end('API requires authorization');
                     } else {
+                        console.log('hmmm');
                         verifyToken(authHeader).then((userInfo) => {
                             handlerInfo.handle(req, res, userInfo.userId, ...matchedParams);
                         }).catch(err => {
@@ -91,7 +108,7 @@ const dispatchRequest = (req, res, requestHandlers) => {
     }
 };
 
-const buildRequestHandlers = (h) => ({
+const buildRequestHandlers = (h, s) => ({
     'DELETE': {
         [gameDetailRegex]: { requiresAuth: true, handle: h.handleDeleteGame }
     },
@@ -112,7 +129,12 @@ const buildRequestHandlers = (h) => ({
         [createBlogRegex]: { requiresAuth: true, handle: h.handleCreateBlog },
         [signupRegex]: { handle: h.handleSignup },
         [loginRegex]: { handle: h.handleLogin },
-        [requestActionRegex]: { requiresAuth: true, handle: h.handleRequestAction }
+        [requestActionRegex]: { requiresAuth: true, handle: h.handleRequestAction },
+        [studioCreateGameRegex]: { requiresAuth: true, handle: s.handleStudioCreateGame },
+        [studioSaveVersionRegex]: { requiresAuth: true, handle: s.handleSaveVersion },
+        [studioRestoreVersionRegex]: { requiresAuth: true, handle: s.handleRestoreVersion },
+        [webhookPushRegex]: { handle: s.handleWebhookPush },
+        [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
     },
     'GET': {
         [mapRegex]: { handle: h.handleGetMap },
@@ -135,7 +157,14 @@ const buildRequestHandlers = (h) => ({
         [adminListSupportMessagesRegex]: { requiresAuth: true, handle: h.handleAdminListSupportMessages },
         [adminListPendingPublishRequestsRegex]: { requiresAuth: true, handle: h.handleAdminListPendingPublishRequests },
         [adminListFailedPublishRequestsRegex]: { requiresAuth: true, handle: h.handleAdminListFailedPublishRequests },
-        [healthRegex]: { handle: h.handleHealth }
+        [healthRegex]: { handle: h.handleHealth },
+        [studioGetVersionFilesRegex]: { requiresAuth: true, handle: s.handleGetVersionFiles },
+        [studioGetFilesRegex]: { requiresAuth: true, handle: s.handleGetFiles },
+        [studioGetFileContentRegex]: { requiresAuth: true, handle: s.handleGetFileContent },
+        [studioGetCloneInfoRegex]: { requiresAuth: true, handle: s.handleGetCloneInfo },
+        [studioGetVersionsRegex]: { requiresAuth: true, handle: s.handleGetVersions },
+        [studioGetBuildsRegex]: { requiresAuth: true, handle: s.handleGetBuilds },
+        [studioListGamesRegex]: { requiresAuth: true, handle: s.handleStudioListGames },
     }
 });
 
