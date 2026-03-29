@@ -1,6 +1,6 @@
 const url = require('url');
 const crypto = require('crypto');
-const { API_PUBLIC_URL } = require('./config');
+const { API_PUBLIC_URL, FORGEJO_USER_SECRET } = require('./config');
 const { generateId } = require('./crypto');
 const {
     getUserRecord, getGame, getGameDetails, getMongoCollection,
@@ -12,6 +12,15 @@ const {
     createForgejoUser, adminEditUser,
 } = require('./forgejo');
 const { getReqBody } = require('./helpers');
+
+// ---------------------------------------------------------------------------
+// Derive a deterministic Forgejo password for a user.
+// No storage needed — recomputed from a server-side secret every time.
+// ---------------------------------------------------------------------------
+
+const deriveForgejoPassword = (userId) => {
+    return crypto.createHmac('sha256', FORGEJO_USER_SECRET).update(userId).digest('hex');
+};
 
 // ---------------------------------------------------------------------------
 // Ensure the user has a Forgejo account (for repo ownership).
@@ -27,14 +36,11 @@ const ensureForgejoUser = (userId) => new Promise((resolve, reject) => {
 
         console.log(`Provisioning Forgejo account for user: ${userId}`);
         const forgejoEmail = `${userId}@homegames.local`;
-        const forgejoPass = crypto.randomBytes(32).toString('hex');
+        const forgejoPass = deriveForgejoPassword(userId);
 
         const markCreated = () => {
             getMongoCollection('users').then(users => {
-                users.updateOne({ userId }, { '$set': {
-                    forgejoAccountCreated: true,
-                    forgejoPassword: forgejoPass,
-                } })
+                users.updateOne({ userId }, { '$set': { forgejoAccountCreated: true } })
                     .then(() => resolve())
                     .catch(() => resolve());
             }).catch(() => resolve());
@@ -55,42 +61,34 @@ const ensureForgejoUser = (userId) => new Promise((resolve, reject) => {
 });
 
 // ---------------------------------------------------------------------------
-// Ensure the user has a saved Forgejo password.
-// Legacy users may have a Forgejo account but no stored password.
-// In that case, reset their password via the admin API and save it.
+// Ensure a legacy user's Forgejo password is synced to the derived value.
+// Only needs to run once per legacy user — sets a flag so subsequent calls
+// are a no-op. No password is stored, just a boolean sync marker.
 // ---------------------------------------------------------------------------
 
-const ensureForgejoPassword = (userId) => new Promise((resolve, reject) => {
+const syncForgejoPassword = (userId) => new Promise((resolve, reject) => {
     getUserRecord(userId).then(user => {
-        if (user.forgejoPassword) {
-            resolve(user.forgejoPassword);
+        if (user.forgejoPasswordSynced) {
+            resolve();
             return;
         }
 
-        // Legacy user — reset their Forgejo password and save it
-        console.log(`Resetting Forgejo password for legacy user: ${userId}`);
-        const newPass = crypto.randomBytes(32).toString('hex');
+        console.log(`Syncing Forgejo password for legacy user: ${userId}`);
+        const derivedPass = deriveForgejoPassword(userId);
 
         adminEditUser(userId, {
-            password: newPass,
+            password: derivedPass,
             must_change_password: false,
             login_name: userId,
             source_id: 0,
         }).then(() => {
             getMongoCollection('users').then(users => {
-                users.updateOne({ userId }, { '$set': { forgejoPassword: newPass } })
-                    .then(() => resolve(newPass))
-                    .catch(err => {
-                        console.error('Failed to save new Forgejo password', err);
-                        // Still resolve with the password — it was set in Forgejo
-                        resolve(newPass);
-                    });
-            }).catch(err => {
-                console.error('Failed to get users collection', err);
-                resolve(newPass);
-            });
+                users.updateOne({ userId }, { '$set': { forgejoPasswordSynced: true } })
+                    .then(() => resolve())
+                    .catch(() => resolve());
+            }).catch(() => resolve());
         }).catch(err => {
-            console.error('Failed to reset Forgejo password for ' + userId, err);
+            console.error('Failed to sync Forgejo password for ' + userId, err);
             reject('Failed to set up clone credentials');
         });
     }).catch(reject);
@@ -817,7 +815,8 @@ const handleGetCloneInfo = (req, res, userId, gameId) => {
         const { FORGEJO_URL } = require('./config');
 
         ensureForgejoUser(userId).then(() => {
-            ensureForgejoPassword(userId).then(forgejoPass => {
+            syncForgejoPassword(userId).then(() => {
+                const forgejoPass = deriveForgejoPassword(userId);
                 const cloneUrl = `${FORGEJO_URL}/${game.forgejoRepo}.git`;
                 const parsed = new URL(cloneUrl);
                 parsed.username = userId;
@@ -830,7 +829,7 @@ const handleGetCloneInfo = (req, res, userId, gameId) => {
                     repo: game.forgejoRepo,
                 }));
             }).catch(err => {
-                console.error('Failed to ensure Forgejo password', err);
+                console.error('Failed to sync Forgejo password', err);
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to generate clone credentials' }));
             });
