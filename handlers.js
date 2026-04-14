@@ -531,8 +531,12 @@ const handleGetAsset = (req, res, assetId) => {
         } else {
             getMongoDocument(assetId).then((documentData) => {
                 if (documentData) {
-                    console.log("JDSFJDSJFDSF");
-                    res.writeHead(200, { 'Content-Disposition': `inline; filename=${encodeURI(assetData.name)}` });
+                    const headers = { 'Content-Disposition': `inline; filename=${encodeURI(assetData.name)}` };
+                    const storedContentType = assetData.metadata && assetData.metadata['Content-Type'];
+                    if (storedContentType) {
+                        headers['Content-Type'] = storedContentType;
+                    }
+                    res.writeHead(200, headers);
                     res.end(documentData.data.buffer);
                 } else {
                     res.writeHead(404);
