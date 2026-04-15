@@ -55,6 +55,7 @@ const studioGetVersionFilesRegex = '/studio/games/(\\S*)/versions/(\\S*)/files';
 const studioRestoreVersionRegex = '/studio/games/(\\S*)/restore';
 const studioGetCloneInfoRegex = '/studio/games/(\\S*)/clone';
 const studioGetBuildsRegex = '/studio/games/(\\S*)/builds';
+const studioGetTemplatesRegex = '/studio/templates';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
 
@@ -163,6 +164,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioGetFileContentRegex]: { requiresAuth: true, handle: s.handleGetFileContent },
         [studioGetCloneInfoRegex]: { requiresAuth: true, handle: s.handleGetCloneInfo },
         [studioGetVersionsRegex]: { requiresAuth: true, handle: s.handleGetVersions },
+        [studioGetTemplatesRegex]: { handle: s.handleGetTemplates },
         [studioGetBuildsRegex]: { requiresAuth: true, handle: s.handleGetBuilds },
         [studioListGamesRegex]: { requiresAuth: true, handle: s.handleStudioListGames },
     }

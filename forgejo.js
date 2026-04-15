@@ -79,13 +79,16 @@ const createForgejoUser = (username, email, password) => {
 // ---------------------------------------------------------------------------
 
 const createRepo = (ownerUsername, repoName) => {
-    return forgejoRequest('POST', `/admin/users/${ownerUsername}/repos`, {
+    // Use the user's own repo creation endpoint, with Sudo to act as them.
+    // The admin endpoint (/admin/users/:user/repos) rejects Sudo since
+    // the impersonated user isn't an admin.
+    return forgejoRequest('POST', `/user/repos`, {
         name: repoName,
         description: `Homegames game: ${repoName}`,
         private: false,
         auto_init: true,
         default_branch: 'main',
-    });
+    }, { sudo: ownerUsername });
 };
 
 const createWebhook = (owner, repo, webhookUrl) => {
@@ -97,11 +100,11 @@ const createWebhook = (owner, repo, webhookUrl) => {
             content_type: 'json',
         },
         events: ['push'],
-    });
+    }, { sudo: owner });
 };
 
 const deleteRepo = (owner, repo) => {
-    return forgejoRequest('DELETE', `/repos/${owner}/${repo}`);
+    return forgejoRequest('DELETE', `/repos/${owner}/${repo}`, null, { sudo: owner });
 };
 
 // ---------------------------------------------------------------------------
@@ -109,12 +112,12 @@ const deleteRepo = (owner, repo) => {
 // ---------------------------------------------------------------------------
 
 const getFileTree = (owner, repo, branch) => {
-    return forgejoRequest('GET', `/repos/${owner}/${repo}/git/trees/${branch}?recursive=true`);
+    return forgejoRequest('GET', `/repos/${owner}/${repo}/git/trees/${branch}?recursive=true`, null, { sudo: owner });
 };
 
 const getFileContents = (owner, repo, filepath, ref) => {
     const refParam = ref ? `?ref=${ref}` : '';
-    return forgejoRequest('GET', `/repos/${owner}/${repo}/contents/${filepath}${refParam}`);
+    return forgejoRequest('GET', `/repos/${owner}/${repo}/contents/${filepath}${refParam}`, null, { sudo: owner });
 };
 
 const createOrUpdateFile = (owner, repo, filepath, content, message, sha) => {
@@ -125,10 +128,10 @@ const createOrUpdateFile = (owner, repo, filepath, content, message, sha) => {
     if (sha) {
         // Update existing file — requires sha for optimistic concurrency
         body.sha = sha;
-        return forgejoRequest('PUT', `/repos/${owner}/${repo}/contents/${filepath}`, body);
+        return forgejoRequest('PUT', `/repos/${owner}/${repo}/contents/${filepath}`, body, { sudo: owner });
     } else {
         // Create new file
-        return forgejoRequest('POST', `/repos/${owner}/${repo}/contents/${filepath}`, body);
+        return forgejoRequest('POST', `/repos/${owner}/${repo}/contents/${filepath}`, body, { sudo: owner });
     }
 };
 
@@ -136,7 +139,7 @@ const deleteFile = (owner, repo, filepath, sha, message) => {
     return forgejoRequest('DELETE', `/repos/${owner}/${repo}/contents/${filepath}`, {
         sha,
         message: message || `Delete ${filepath}`,
-    });
+    }, { sudo: owner });
 };
 
 // ---------------------------------------------------------------------------
@@ -154,11 +157,11 @@ const adminEditUser = (username, fields) => {
 
 const listCommits = (owner, repo, branch, limit, page) => {
     const params = `?sha=${branch || 'main'}&limit=${limit || 10}&page=${page || 1}`;
-    return forgejoRequest('GET', `/repos/${owner}/${repo}/commits${params}`);
+    return forgejoRequest('GET', `/repos/${owner}/${repo}/commits${params}`, null, { sudo: owner });
 };
 
 const getRepoInfo = (owner, repo) => {
-    return forgejoRequest('GET', `/repos/${owner}/${repo}`);
+    return forgejoRequest('GET', `/repos/${owner}/${repo}`, null, { sudo: owner });
 };
 
 module.exports = {

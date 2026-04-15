@@ -101,6 +101,212 @@ const syncForgejoPassword = (userId) => new Promise((resolve, reject) => {
 });
 
 // ---------------------------------------------------------------------------
+// Game templates
+// ---------------------------------------------------------------------------
+
+const GAME_TEMPLATES = {
+    'click': {
+        label: 'Click Game',
+        description: 'A simple game where clicking changes colors. Good starting point.',
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '1010',
+            author: 'Unknown',
+            description: 'A new Homegames game'
+        };
+    }
+
+    constructor() {
+        super();
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: Colors.COLORS.WHITE,
+            onClick: (playerId, x, y) => {
+                const color = Colors.randomColor();
+                const dot = new GameNode.Shape({
+                    shapeType: Shapes.POLYGON,
+                    coordinates2d: ShapeUtils.rectangle(x - 2, y - 2, 4, 4),
+                    fill: color
+                });
+                this.base.addChild(dot);
+            }
+        });
+    }
+
+    handleNewPlayer({ playerId }) {
+    }
+
+    handlePlayerDisconnect(playerId) {
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'keyboard': {
+        label: 'Keyboard Game',
+        description: 'A game with a movable character using arrow keys or WASD.',
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+const COLORS = Colors.COLORS;
+
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '1010',
+            author: 'Unknown',
+            description: 'A new Homegames game',
+            tickRate: 60
+        };
+    }
+
+    constructor() {
+        super();
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE
+        });
+
+        this.player = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(45, 45, 10, 10),
+            fill: COLORS.BLUE
+        });
+
+        this.base.addChild(this.player);
+        this.speed = 0.5;
+    }
+
+    handleNewPlayer({ playerId }) {
+    }
+
+    handlePlayerDisconnect(playerId) {
+    }
+
+    handleKeyDown(playerId, key) {
+        const coords = this.player.node.coordinates2d;
+        let x = coords[0][0];
+        let y = coords[0][1];
+
+        if (key === 'ArrowUp' || key === 'w') y = Math.max(0, y - this.speed);
+        if (key === 'ArrowDown' || key === 's') y = Math.min(90, y + this.speed);
+        if (key === 'ArrowLeft' || key === 'a') x = Math.max(0, x - this.speed);
+        if (key === 'ArrowRight' || key === 'd') x = Math.min(90, x + this.speed);
+
+        this.player.node.coordinates2d = ShapeUtils.rectangle(x, y, 10, 10);
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'multiplayer': {
+        label: 'Multiplayer Game',
+        description: 'A game that tracks players with per-player colored squares.',
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+const COLORS = Colors.COLORS;
+
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '1010',
+            author: 'Unknown',
+            description: 'A new Homegames game'
+        };
+    }
+
+    constructor() {
+        super();
+        this.players = {};
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE,
+            onClick: (playerId, x, y) => {
+                const player = this.players[playerId];
+                if (!player) return;
+                const dot = new GameNode.Shape({
+                    shapeType: Shapes.POLYGON,
+                    coordinates2d: ShapeUtils.rectangle(x - 2, y - 2, 4, 4),
+                    fill: player.color,
+                    playerIds: [playerId]
+                });
+                this.base.addChild(dot);
+            }
+        });
+
+        this.playerListNode = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 0, 0)
+        });
+        this.base.addChild(this.playerListNode);
+    }
+
+    handleNewPlayer({ playerId, info }) {
+        const color = Colors.randomColor();
+        this.players[playerId] = { info, color };
+        this.renderPlayerList();
+    }
+
+    handlePlayerDisconnect(playerId) {
+        delete this.players[playerId];
+        this.renderPlayerList();
+    }
+
+    renderPlayerList() {
+        this.playerListNode.clearChildren();
+        let y = 2;
+        for (const id in this.players) {
+            const p = this.players[id];
+            const badge = new GameNode.Shape({
+                shapeType: Shapes.POLYGON,
+                coordinates2d: ShapeUtils.rectangle(2, y, 3, 3),
+                fill: p.color
+            });
+            const label = new GameNode.Text({
+                textInfo: {
+                    text: p.info?.name || ('Player ' + id),
+                    x: 7, y: y + 0.5,
+                    size: 1.2, color: COLORS.BLACK, align: 'left'
+                }
+            });
+            this.playerListNode.addChildren(badge, label);
+            y += 5;
+        }
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Game creation (with Forgejo repo)
 // ---------------------------------------------------------------------------
 
@@ -121,10 +327,17 @@ const handleStudioCreateGame = (req, res, userId) => {
             return;
         }
 
-        const { name, description } = body;
+        const { name, description, template } = body;
         if (!name) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'Game name is required' }));
+            return;
+        }
+
+        // Validate template if provided
+        if (template && !GAME_TEMPLATES[template]) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Unknown template: ' + template }));
             return;
         }
 
@@ -135,68 +348,73 @@ const handleStudioCreateGame = (req, res, userId) => {
             return;
         }
 
+        // Commit template files to the repo after creation
+        const commitTemplateFiles = (owner, repo) => new Promise((resolve, reject) => {
+            if (!template || !GAME_TEMPLATES[template]) { resolve(); return; }
+            const files = GAME_TEMPLATES[template].files;
+            const paths = Object.keys(files);
+            const commitNext = (i) => {
+                if (i >= paths.length) { resolve(); return; }
+                const filePath = paths[i];
+                const content = files[filePath];
+                createOrUpdateFile(owner, repo, filePath, content, `Add ${filePath} from template`, null)
+                    .then(() => commitNext(i + 1))
+                    .catch(err => {
+                        console.error(`Failed to commit template file ${filePath}`, err);
+                        resolve(); // Don't fail game creation over template files
+                    });
+            };
+            commitNext(0);
+        });
+
+        // Create game record in MongoDB and respond
+        const finishGameCreation = () => {
+            const gameId = generateId();
+            const gameData = {
+                gameId,
+                name,
+                description: description || '',
+                developerId: userId,
+                created: Date.now(),
+                forgejoRepo: `${userId}/${repoName}`,
+                featured: false,
+            };
+
+            getMongoCollection('games').then(collection => {
+                collection.insertOne(gameData).then(() => {
+                    updateGameSearch(gameData).catch(err => {
+                        console.error('Failed to update game search', err);
+                    });
+                    commitTemplateFiles(userId, repoName).then(() => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            id: gameId,
+                            name,
+                            description: description || '',
+                            forgejoRepo: `${userId}/${repoName}`,
+                        }));
+                    });
+                }).catch(err => {
+                    console.error('Failed to create game record', err);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to create game' }));
+                });
+            }).catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        };
+
         ensureForgejoUser(userId).then(() => {
             createRepo(userId, repoName).then(repo => {
                 const webhookUrl = `${API_PUBLIC_URL}/webhook/push`;
-                createWebhook(userId, repoName, webhookUrl).then(() => {
-                    const gameId = generateId();
-                    const gameData = {
-                        gameId,
-                        name,
-                        description: description || '',
-                        developerId: userId,
-                        created: Date.now(),
-                        forgejoRepo: `${userId}/${repoName}`,
-                        featured: false,
-                    };
-
-                    getMongoCollection('games').then(collection => {
-                        collection.insertOne(gameData).then(() => {
-                            updateGameSearch(gameData).catch(err => {
-                                console.error('Failed to update game search', err);
-                            });
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                id: gameId,
-                                name,
-                                description: description || '',
-                                forgejoRepo: `${userId}/${repoName}`,
-                            }));
-                        }).catch(err => {
-                            console.error('Failed to create game record', err);
-                            res.writeHead(500);
-                            res.end(JSON.stringify({ error: 'Failed to create game' }));
-                        });
-                    }).catch(err => {
-                        res.writeHead(500);
-                        res.end(JSON.stringify({ error: 'Database error' }));
+                createWebhook(userId, repoName, webhookUrl)
+                    .then(() => finishGameCreation())
+                    .catch(err => {
+                        console.error('Failed to create webhook', err);
+                        // Repo was created but webhook failed — still continue
+                        finishGameCreation();
                     });
-                }).catch(err => {
-                    console.error('Failed to create webhook', err);
-                    // Repo was created but webhook failed — still return success
-                    // Webhook can be added later
-                    const gameId = generateId();
-                    const gameData = {
-                        gameId,
-                        name,
-                        description: description || '',
-                        developerId: userId,
-                        created: Date.now(),
-                        forgejoRepo: `${userId}/${repoName}`,
-                        featured: false,
-                    };
-                    getMongoCollection('games').then(collection => {
-                        collection.insertOne(gameData).then(() => {
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                id: gameId,
-                                name,
-                                description: description || '',
-                                forgejoRepo: `${userId}/${repoName}`,
-                            }));
-                        });
-                    });
-                });
             }).catch(err => {
                 console.error('Failed to create Forgejo repo', err);
                 res.writeHead(500);
@@ -209,6 +427,20 @@ const handleStudioCreateGame = (req, res, userId) => {
             res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to set up development account' }));
         });
     });
+};
+
+// ---------------------------------------------------------------------------
+// List available templates
+// ---------------------------------------------------------------------------
+
+const handleGetTemplates = (req, res) => {
+    const templates = Object.entries(GAME_TEMPLATES).map(([key, tmpl]) => ({
+        id: key,
+        label: tmpl.label,
+        description: tmpl.description,
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ templates }));
 };
 
 // ---------------------------------------------------------------------------
@@ -853,6 +1085,7 @@ const handleGetCloneInfo = (req, res, userId, gameId) => {
 
 module.exports = {
     handleStudioCreateGame,
+    handleGetTemplates,
     handleGetFiles,
     handleGetFileContent,
     handleSaveVersion,
