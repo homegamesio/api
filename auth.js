@@ -35,10 +35,8 @@ const login = (request) => new Promise((resolve, reject) => {
 });
 
 const mongoSignup = (userId, password) => new Promise((resolve, reject) => {
-    console.log('adfjksdf');
     const client = require('./db').getMongoClient();
     const { DB_NAME } = require('./config');
-    console.log('sdnjkfsdkjf');
     client.connect().then(() => {
         const db = client.db(DB_NAME);
         const collection = db.collection('users');

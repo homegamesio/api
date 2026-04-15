@@ -5,10 +5,6 @@ const { generateId, hashValue } = require('./crypto');
 const { mapBlogPost, mapMongoGame } = require('./models');
 
 const getMongoClient = () => {
-    console.log('dbdbdbd');
-    console.log(DB_USERNAME);
-    console.log(DB_PASSWORD);
-    console.log(DB_HOST);
     const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
     const params = {};
     if (DB_USERNAME) {
@@ -144,10 +140,7 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
     client.connect().then(() => {
         const db = client.db(DB_NAME);
         const collection = db.collection('users');
-        console.log('for ' + userId);
         collection.findOne({ userId }).then((userResponse) => {
-            console.log('found user');
-            console.log(userResponse);
             const { userId, created, image, description } = userResponse;
 
                 resolve({
@@ -229,7 +222,6 @@ const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((
             };
         }
         collection.countDocuments(dbQuery).then((count) => {
-            console.log('dsjfjsdfdsf');
             collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
                 resolve({ assets, count });
             }).catch(reject);
@@ -308,7 +300,6 @@ const listGamesForAuthor = (params) => new Promise((resolve, reject) => {
 });
 
 const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
-    console.log("gonna list games");
     getMongoCollection('games').then(collection => {
         const actualLimit = limit || 10;
         const skip = ( page - 1 ) * actualLimit;
@@ -334,8 +325,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
-                        console.log("VIERIEIREIRIER");
-                        console.log(versions);
                         resolve({
                             game: {
                                 name: gameResult.name,
@@ -363,7 +352,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
 });
 
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
-    console.log('looking for ' + requestId);
     getMongoCollection('publishRequests').then((collection) => {
         collection.findOne({ requestId }).then((result) => {
             if (!result) {
@@ -400,8 +388,6 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
 
     getPublishRequest(requestId).then(requestData => {
         const gameId = requestData.gameId;
-        console.log("this is publish request");
-        console.log(requestData);
         getMongoCollection('publishRequests').then((publishRequests) => {
             publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => {
                 getMongoCollection('gameVersions').then(gameVersions => {
