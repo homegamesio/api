@@ -1,11 +1,3 @@
-const mapElasticSearchGame = (_game) => {
-    const game = _game._source;
-    return {
-        id: game.gameId,
-        ...game
-    };
-};
-
 const mapBlogPost = (post, includeContent) => {
     const mapped = {
         id: post.id,
@@ -88,7 +80,6 @@ const transformS3Response = (s3Content) => {
 };
 
 module.exports = {
-    mapElasticSearchGame,
     mapBlogPost,
     mapMongoGame,
     mapGame,

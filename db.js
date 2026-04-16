@@ -5,6 +5,7 @@ const { generateId, hashValue } = require('./crypto');
 const { mapBlogPost, mapMongoGame } = require('./models');
 
 const getMongoClient = () => {
+    console.log("DBDBDBD " + DB_HOST)
     const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
     const params = {};
     if (DB_USERNAME) {
@@ -501,21 +502,59 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
     });
 });
 
-const deleteGame = (gameId, elasticDeleteGame) => new Promise((resolve, reject) => {
-    elasticDeleteGame(gameId).then(() => {
-        console.log('deleted game from elastic thing');
-        getMongoCollection('games').then(gameCollection => {
-            console.log('need to delete game from collection');
-            gameCollection.deleteOne({ gameId }).then(() => {
-                console.log('deleted game from db');
-                getMongoCollection('gameVersions').then(gameVersions => {
-                    gameCollection.deleteMany({ gameId }).then(() => {
-                        console.log('deleted game versions');
-                    });
+const deleteGame = (gameId) => new Promise((resolve, reject) => {
+    getMongoCollection('games').then(gameCollection => {
+        gameCollection.deleteOne({ gameId }).then(() => {
+            getMongoCollection('gameVersions').then(gameVersions => {
+                gameVersions.deleteMany({ gameId }).then(() => {
+                    resolve();
+                }).catch(reject);
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
+const listGames = (limit = 6, offset = 0, sort, query, tags) => new Promise((resolve, reject) => {
+    console.log('dsfjhksdf');
+    getMongoCollection('games').then(collection => {
+        console.log('dsfjklsdfdfs 111');
+        let dbQuery = {};
+        if (query) {
+            dbQuery = {
+                '$or': [
+                    { name: { '$regex': query, $options: 'i' } },
+                    { description: { '$regex': query, $options: 'i' } },
+                    { developerId: { '$regex': query, $options: 'i' } }
+                ]
+            };
+        }
+        collection.countDocuments(dbQuery).then((count) => {
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(games => {
+                const pageCount = Math.ceil(count / limit);
+                resolve({
+                    games: games.map(mapMongoGame),
+                    pageCount,
+                    total: count
                 });
-            });
-        });
-    });
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
+const listPublicGamesForAuthor = ({ author, offset = 0, limit = 10 }) => new Promise((resolve, reject) => {
+    getMongoCollection('games').then(collection => {
+        const dbQuery = { developerId: author };
+        collection.countDocuments(dbQuery).then((count) => {
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(games => {
+                const pageCount = Math.ceil(count / limit);
+                resolve({
+                    total: count,
+                    games: games.map(mapMongoGame),
+                    pageCount
+                });
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
 });
 
 module.exports = {
@@ -554,4 +593,6 @@ module.exports = {
     getCertRecord,
     getCertStatus,
     deleteGame,
+    listGames,
+    listPublicGamesForAuthor,
 };

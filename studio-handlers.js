@@ -5,7 +5,6 @@ const { generateId } = require('./crypto');
 const {
     getUserRecord, getGame, getGameDetails, getMongoCollection,
 } = require('./db');
-const { updateGameSearch } = require('./search');
 const {
     createRepo, createWebhook, getFileTree, getFileContents,
     createOrUpdateFile, deleteFile, listCommits, getRepoInfo,
@@ -382,9 +381,6 @@ const handleStudioCreateGame = (req, res, userId) => {
 
             getMongoCollection('games').then(collection => {
                 collection.insertOne(gameData).then(() => {
-                    updateGameSearch(gameData).catch(err => {
-                        console.error('Failed to update game search', err);
-                    });
                     commitTemplateFiles(userId, repoName).then(() => {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({

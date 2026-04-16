@@ -15,8 +15,8 @@ const {
     adminListFailedPublishRequests, listPublishRequests, getGameDetails,
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
+    listGames, listPublicGamesForAuthor,
 } = require('./db');
-const { elasticDeleteGame, listGames, listPublicGamesForAuthor, updateGameIndex } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
 const { login, signup } = require('./auth');
 const {
@@ -30,10 +30,6 @@ const setGameMaps = (maps) => { gameMaps = maps; };
 
 // Wrappers for functions that need cross-module references
 const createGame = (developerId, thumbnailAssetId, fields, files) => {
-    const { createGame: _createGame } = require('./db');
-    // createGame in db.js calls updateGameSearch and createGameImagePublishRequest
-    // but the original was in index.js with access to both. We replicate it here.
-    const { updateGameSearch } = require('./search');
     return new Promise((resolve, reject) => {
         console.log('creating game with thumbnail asset ' + thumbnailAssetId);
         getMongoCollection('games').then(collection => {
@@ -49,10 +45,6 @@ const createGame = (developerId, thumbnailAssetId, fields, files) => {
             const beforeMongoInsertsId = Object.assign({}, gameData);
             collection.insertOne(gameData).then(() => {
                 resolve(beforeMongoInsertsId);
-                updateGameSearch(beforeMongoInsertsId).catch((err) => {
-                    console.error("Failed to update game search");
-                    console.error(err);
-                });
                 createGameImagePublishRequest(developerId, thumbnailAssetId, gameId).catch((err) => {
                     console.error('Failed to create game image request');
                     console.error(err);
@@ -72,7 +64,7 @@ const handleDeleteGame = (req, res, userId, gameId) => {
     getUserRecord(userId).then(userData => {
         if (userData.isAdmin) {
             console.log('wanna delete ' + gameId);
-            deleteGame(gameId, elasticDeleteGame).then(() => res.end(''));
+            deleteGame(gameId).then(() => res.end(''));
         } else {
             console.warn(`user ${userId} tried to delete game ${gameId}`);
             res.end('');
@@ -468,14 +460,8 @@ const handleRequestAction = (req, res, userId, requestId) => {
             getReqBody(req, (_data) => {
                 const reqBody = JSON.parse(_data);
                 if (reqBody.action) {
-                    adminPublishRequestAction(requestId, reqBody.action, reqBody.message).then((gameId) => {
-                        if (reqBody.action === 'approve') {
-                            updateGameIndex(gameId, getGame).then(() => {
-                                res.end('');
-                            }).catch(err => {
-                                res.end(err.toString());
-                            });
-                        }
+                    adminPublishRequestAction(requestId, reqBody.action, reqBody.message).then(() => {
+                        res.end('');
                     }).catch(err => {
                         console.log('error performing publish action');
                         console.log(err);
@@ -628,6 +614,7 @@ const handleListGames = (req, res) => {
             res.end('error');
         });
     } else {
+        console.log('s8dfjdsf');
         listGames(limit, offset, null, query).then(results => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(results));

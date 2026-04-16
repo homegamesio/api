@@ -56,7 +56,6 @@ module.exports = {
     generateId: cryptoUtils.generateId,
 
     // models
-    mapElasticSearchGame: models.mapElasticSearchGame,
     mapBlogPost: models.mapBlogPost,
     mapMongoGame: models.mapMongoGame,
     mapGame: models.mapGame,

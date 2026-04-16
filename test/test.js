@@ -17,7 +17,6 @@ const {
     hashPassword,
     getHash,
     generateId,
-    mapElasticSearchGame,
     mapBlogPost,
     mapMongoGame,
     mapGame,
@@ -320,36 +319,6 @@ describe('generateId', () => {
             ids.add(generateId());
         }
         assert.equal(ids.size, 100);
-    });
-});
-
-describe('mapElasticSearchGame', () => {
-    it('should extract _source and add id from gameId', () => {
-        const input = {
-            _source: {
-                gameId: 'abc123',
-                name: 'Test Game',
-                description: 'A game',
-                developerId: 'dev1'
-            }
-        };
-        const result = mapElasticSearchGame(input);
-        assert.equal(result.id, 'abc123');
-        assert.equal(result.gameId, 'abc123');
-        assert.equal(result.name, 'Test Game');
-        assert.equal(result.description, 'A game');
-        assert.equal(result.developerId, 'dev1');
-    });
-
-    it('should spread all _source fields', () => {
-        const input = {
-            _source: {
-                gameId: 'x',
-                customField: 'customValue'
-            }
-        };
-        const result = mapElasticSearchGame(input);
-        assert.equal(result.customField, 'customValue');
     });
 });
 
