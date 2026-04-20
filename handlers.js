@@ -761,6 +761,195 @@ const handleHealth = (req, res) => {
     res.end('ok!');
 };
 
+// ---------------------------------------------------------------------------
+// Game Sessions — create a session on homegames-core via Homenames
+// ---------------------------------------------------------------------------
+
+const handleCreateSession = (req, res) => {
+    const http = require('http');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const { pipeline } = require('stream');
+    const { HOMENAMES_URL } = require('./config');
+    const { downloadArchive } = require('./forgejo');
+
+    getReqBody(req, (_body, err) => {
+        if (err) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Error reading request' }));
+            return;
+        }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            return;
+        }
+
+        const { gameId, commitSha } = body;
+        if (!gameId) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'gameId is required' }));
+            return;
+        }
+
+        // Look up the game to find its Forgejo repo
+        getGame(gameId).then(game => {
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+
+            // If no commitSha given, find the latest published version
+            const findCommit = commitSha
+                ? Promise.resolve(commitSha)
+                : new Promise((resolve, reject) => {
+                    getMongoCollection('gameVersions').then(collection => {
+                        collection.find({ gameId, published: true })
+                            .sort({ publishedAt: -1 })
+                            .limit(1)
+                            .toArray()
+                            .then(versions => {
+                                if (versions.length === 0) {
+                                    reject('No published versions for this game');
+                                } else {
+                                    resolve(versions[0].commitSha);
+                                }
+                            }).catch(reject);
+                    }).catch(reject);
+                });
+
+            findCommit.then(sha => {
+                const [owner, repo] = game.forgejoRepo.split('/');
+
+                console.log(`[sessions] Downloading archive for ${owner}/${repo}@${sha.substring(0, 7)}`);
+
+                // Download the archive from Forgejo
+                downloadArchive(owner, repo, sha).then(archiveBuf => {
+                    // Write to temp file and extract
+                    const tmpDir = path.join(os.tmpdir(), `hg-game-${gameId}-${sha.substring(0, 7)}-${Date.now()}`);
+                    fs.mkdirSync(tmpDir, { recursive: true });
+                    const tarPath = path.join(tmpDir, 'archive.tar.gz');
+                    fs.writeFileSync(tarPath, archiveBuf);
+
+                    // Extract tar.gz
+                    const { execSync } = require('child_process');
+                    try {
+                        execSync(`tar -xzf ${tarPath} -C ${tmpDir}`, { stdio: 'pipe' });
+                    } catch (extractErr) {
+                        console.error('[sessions] Failed to extract archive:', extractErr.message);
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ error: 'Failed to extract game archive' }));
+                        return;
+                    }
+
+                    // Find the extracted directory (Forgejo wraps in a subdir like "reponame")
+                    const entries = fs.readdirSync(tmpDir).filter(e => {
+                        return e !== 'archive.tar.gz' && fs.statSync(path.join(tmpDir, e)).isDirectory();
+                    });
+
+                    const gamePath = entries.length > 0
+                        ? path.join(tmpDir, entries[0])
+                        : tmpDir;
+
+                    // Verify index.js exists
+                    if (!fs.existsSync(path.join(gamePath, 'index.js'))) {
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: 'Game archive does not contain index.js' }));
+                        return;
+                    }
+
+                    console.log(`[sessions] Game extracted to ${gamePath}, calling Homenames`);
+
+                    // Call Homenames POST /sessions
+                    const homenamesUrl = new URL(HOMENAMES_URL);
+                    const postBody = JSON.stringify({
+                        gamePath: path.join(gamePath, 'index.js'),
+                        gameId,
+                        gameKey: game.name || gameId,
+                    });
+
+                    const homenamesReq = http.request({
+                        hostname: homenamesUrl.hostname,
+                        port: homenamesUrl.port,
+                        path: '/sessions',
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Content-Length': Buffer.byteLength(postBody),
+                        },
+                    }, (homenamesRes) => {
+                        let data = '';
+                        homenamesRes.on('data', (chunk) => { data += chunk; });
+                        homenamesRes.on('end', () => {
+                            if (homenamesRes.statusCode >= 200 && homenamesRes.statusCode < 300) {
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(data);
+                            } else {
+                                console.error('[sessions] Homenames error:', data);
+                                res.writeHead(homenamesRes.statusCode || 500);
+                                res.end(data);
+                            }
+                        });
+                    });
+
+                    homenamesReq.on('error', (e) => {
+                        console.error('[sessions] Failed to reach Homenames:', e.message);
+                        res.writeHead(502);
+                        res.end(JSON.stringify({ error: 'Failed to reach game server' }));
+                    });
+
+                    homenamesReq.write(postBody);
+                    homenamesReq.end();
+
+                }).catch(archiveErr => {
+                    console.error('[sessions] Failed to download archive:', archiveErr);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to download game code' }));
+                });
+            }).catch(commitErr => {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: typeof commitErr === 'string' ? commitErr : 'Failed to find version' }));
+            });
+        }).catch(gameErr => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Get published versions for a game (for the version dropdown in "Try it")
+// ---------------------------------------------------------------------------
+
+const handleGetPublishedVersions = (req, res, gameId) => {
+    getMongoCollection('gameVersions').then(collection => {
+        collection.find({ gameId, published: true })
+            .sort({ publishedAt: -1 })
+            .toArray()
+            .then(versions => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    versions: versions.map(v => ({
+                        versionId: v.versionId,
+                        commitSha: v.commitSha,
+                        publishedAt: v.publishedAt,
+                        publishedBy: v.publishedBy,
+                    })),
+                }));
+            }).catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Failed to list versions' }));
+            });
+    }).catch(err => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Database error' }));
+    });
+};
+
 module.exports = {
     setGameMaps,
     handleDeleteGame,
@@ -777,4 +966,5 @@ module.exports = {
     handleGetDevProfile, handleGetProfile, handleGetPublishRequests,
     handleAdminListSupportMessages, handleAdminListPendingPublishRequests,
     handleAdminListFailedPublishRequests, handleHealth,
+    handleCreateSession, handleGetPublishedVersions,
 };

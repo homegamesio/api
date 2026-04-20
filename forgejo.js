@@ -164,6 +164,52 @@ const getRepoInfo = (owner, repo) => {
     return forgejoRequest('GET', `/repos/${owner}/${repo}`, null, { sudo: owner });
 };
 
+// ---------------------------------------------------------------------------
+// Download repo archive as a tar.gz buffer
+// Uses Forgejo's /repos/{owner}/{repo}/archive/{ref}.tar.gz endpoint
+// ---------------------------------------------------------------------------
+const downloadArchive = (owner, repo, ref) => new Promise((resolve, reject) => {
+    const { hostname, port } = parseForgejoUrl();
+
+    const options = {
+        hostname,
+        port,
+        path: `/api/v1/repos/${owner}/${repo}/archive/${ref}.tar.gz`,
+        method: 'GET',
+        headers: {
+            'Authorization': `token ${FORGEJO_ADMIN_TOKEN}`,
+        },
+    };
+
+    const req = http.request(options, (res) => {
+        if (res.statusCode === 302 || res.statusCode === 301) {
+            // Follow redirect (Forgejo sometimes redirects archive downloads)
+            const redirectUrl = res.headers.location;
+            const redirectModule = redirectUrl.startsWith('https') ? require('https') : http;
+            redirectModule.get(redirectUrl, (redirectRes) => {
+                const bufs = [];
+                redirectRes.on('data', (chunk) => bufs.push(chunk));
+                redirectRes.on('end', () => resolve(Buffer.concat(bufs)));
+            }).on('error', reject);
+            return;
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => reject({ status: res.statusCode, body }));
+            return;
+        }
+
+        const bufs = [];
+        res.on('data', (chunk) => bufs.push(chunk));
+        res.on('end', () => resolve(Buffer.concat(bufs)));
+    });
+
+    req.on('error', reject);
+    req.end();
+});
+
 module.exports = {
     forgejoRequest,
     createForgejoUser,
@@ -177,4 +223,5 @@ module.exports = {
     deleteFile,
     listCommits,
     getRepoInfo,
+    downloadArchive,
 };

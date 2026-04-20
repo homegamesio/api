@@ -44,6 +44,9 @@ const certRequestRegex = '/request-cert';
 const certStatusRegex = '/cert-status';
 const assetsRegex = '/assets/(\\S*)';
 
+const createSessionRegex = '/sessions';
+const publishedVersionsRegex = '/games/(\\S*)/published-versions';
+
 // Studio routes
 const studioCreateGameRegex = '/studio/games';
 const studioListGamesRegex = '/studio/games';
@@ -137,6 +140,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioSaveVersionRegex]: { requiresAuth: true, handle: s.handleSaveVersion },
         [studioRestoreVersionRegex]: { requiresAuth: true, handle: s.handleRestoreVersion },
         [studioPublishRegex]: { requiresAuth: true, handle: s.handleSubmitPublishRequest },
+        [createSessionRegex]: { handle: h.handleCreateSession },
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
     },
@@ -151,6 +155,7 @@ const buildRequestHandlers = (h, s) => ({
         [serviceRequestsRegex]: { handle: h.handleGetServiceRequest },
         [listMyGamesRegex]: { requiresAuth: true, handle: h.handleListMyGames },
         [listGamesRegex]: { handle: h.handleListGames },
+        [publishedVersionsRegex]: { handle: h.handleGetPublishedVersions },
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },
         [gameVersionDetailRegex]: { handle: h.handleGetGameVersionDetail },

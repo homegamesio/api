@@ -41,6 +41,7 @@ const FORGEJO_ADMIN_TOKEN = process.env.FORGEJO_ADMIN_TOKEN || '';
 const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
 const FORGEJO_USER_SECRET = process.env.FORGEJO_USER_SECRET || 'change-me-forgejo-user-secret';
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
+const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
 // 50 MB max
 const MAX_SIZE = 50 * 1024 * 1024;
@@ -72,4 +73,5 @@ module.exports = {
     FORGEJO_WEBHOOK_SECRET,
     FORGEJO_USER_SECRET,
     API_PUBLIC_URL,
+    HOMENAMES_URL,
 };
