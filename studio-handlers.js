@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
 const { API_PUBLIC_URL, FORGEJO_USER_SECRET } = require('./config');
@@ -5,7 +7,7 @@ const { generateId } = require('./crypto');
 const {
     getUserRecord, getGame, getGameDetails, getMongoCollection,
 } = require('./db');
-const { updateGameSearch } = require('./search');
+
 const {
     createRepo, createWebhook, getFileTree, getFileContents,
     createOrUpdateFile, deleteFile, listCommits, getRepoInfo,
@@ -348,20 +350,28 @@ const handleStudioCreateGame = (req, res, userId) => {
             return;
         }
 
-        // Commit template files to the repo after creation
-        const commitTemplateFiles = (owner, repo) => new Promise((resolve, reject) => {
-            if (!template || !GAME_TEMPLATES[template]) { resolve(); return; }
-            const files = GAME_TEMPLATES[template].files;
-            const paths = Object.keys(files);
+        // Commit initial files to the repo after creation (LICENSE + template files)
+        const commitInitialFiles = (owner, repo) => new Promise((resolve, reject) => {
+            // Always include GPLv3 LICENSE
+            const gplText = fs.readFileSync(path.join(__dirname, 'gpl-3.0.txt'), 'utf-8');
+            const filesToCommit = [{ path: 'LICENSE', content: gplText }];
+
+            // Add template files if a template was selected
+            if (template && GAME_TEMPLATES[template]) {
+                const templateFiles = GAME_TEMPLATES[template].files;
+                for (const filePath of Object.keys(templateFiles)) {
+                    filesToCommit.push({ path: filePath, content: templateFiles[filePath] });
+                }
+            }
+
             const commitNext = (i) => {
-                if (i >= paths.length) { resolve(); return; }
-                const filePath = paths[i];
-                const content = files[filePath];
-                createOrUpdateFile(owner, repo, filePath, content, `Add ${filePath} from template`, null)
+                if (i >= filesToCommit.length) { resolve(); return; }
+                const file = filesToCommit[i];
+                createOrUpdateFile(owner, repo, file.path, file.content, `Add ${file.path}`, null)
                     .then(() => commitNext(i + 1))
                     .catch(err => {
-                        console.error(`Failed to commit template file ${filePath}`, err);
-                        resolve(); // Don't fail game creation over template files
+                        console.error(`Failed to commit file ${file.path}`, err);
+                        resolve(); // Don't fail game creation over initial files
                     });
             };
             commitNext(0);
@@ -382,10 +392,7 @@ const handleStudioCreateGame = (req, res, userId) => {
 
             getMongoCollection('games').then(collection => {
                 collection.insertOne(gameData).then(() => {
-                    updateGameSearch(gameData).catch(err => {
-                        console.error('Failed to update game search', err);
-                    });
-                    commitTemplateFiles(userId, repoName).then(() => {
+                    commitInitialFiles(userId, repoName).then(() => {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({
                             id: gameId,
@@ -1083,6 +1090,159 @@ const handleGetCloneInfo = (req, res, userId, gameId) => {
     });
 };
 
+// ---------------------------------------------------------------------------
+// Submit publish request
+// ---------------------------------------------------------------------------
+
+const handleSubmitPublishRequest = (req, res, userId, gameId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const { commitSha } = body;
+        if (!commitSha) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'commitSha is required' }));
+            return;
+        }
+
+        getGame(gameId).then(game => {
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'Not your game' }));
+                return;
+            }
+
+            // Check for existing pending/processing request for same game+commit
+            getMongoCollection('publishRequests').then(collection => {
+                collection.findOne({
+                    gameId,
+                    commitSha,
+                    status: { $in: ['PENDING', 'PROCESSING'] }
+                }).then(existing => {
+                    if (existing) {
+                        res.writeHead(409);
+                        res.end(JSON.stringify({
+                            error: 'A publish request for this version is already pending',
+                            requestId: existing.requestId,
+                        }));
+                        return;
+                    }
+
+                    const requestId = generateId();
+                    const record = {
+                        requestId,
+                        userId,
+                        gameId,
+                        commitSha,
+                        status: 'PENDING',
+                        created: Date.now(),
+                    };
+
+                    collection.insertOne(record).then(() => {
+                        // Enqueue to RabbitMQ
+                        const amqp = require('amqplib/callback_api');
+                        const { QUEUE_HOST } = require('./config');
+                        const QUEUE_NAME = 'publish_requests';
+
+                        amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
+                            if (err) {
+                                console.error('Failed to connect to queue', err);
+                                // Record was created — worker can pick it up later
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                return;
+                            }
+
+                            conn.createChannel((err1, channel) => {
+                                if (err1) {
+                                    console.error('Failed to create channel', err1);
+                                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                    return;
+                                }
+
+                                channel.assertQueue(QUEUE_NAME, { durable: true });
+                                channel.sendToQueue(
+                                    QUEUE_NAME,
+                                    Buffer.from(JSON.stringify({
+                                        requestId,
+                                        gameId,
+                                        commitSha,
+                                        userId,
+                                    })),
+                                    { persistent: true }
+                                );
+
+                                console.log(`Publish request ${requestId} enqueued for ${gameId}@${commitSha.substring(0, 7)}`);
+
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ requestId, status: 'PENDING', queued: true }));
+
+                                // Close connection after a short delay
+                                setTimeout(() => { try { conn.close(); } catch (e) {} }, 500);
+                            });
+                        });
+                    }).catch(err => {
+                        console.error('Failed to create publish request record', err);
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ error: 'Failed to create publish request' }));
+                    });
+                });
+            }).catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        }).catch(err => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Get publish request statuses for a game
+// ---------------------------------------------------------------------------
+
+const handleGetPublishStatuses = (req, res, userId, gameId) => {
+    getMongoCollection('publishRequests').then(collection => {
+        collection.find({ gameId })
+            .sort({ created: -1 })
+            .limit(100)
+            .toArray()
+            .then(requests => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    requests: requests.map(r => ({
+                        requestId: r.requestId,
+                        commitSha: r.commitSha,
+                        status: r.status,
+                        error: r.error || null,
+                        created: r.created,
+                        completedAt: r.completedAt || null,
+                    })),
+                }));
+            })
+            .catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Failed to get publish statuses' }));
+            });
+    }).catch(err => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Database error' }));
+    });
+};
+
 module.exports = {
     handleStudioCreateGame,
     handleGetTemplates,
@@ -1097,4 +1257,6 @@ module.exports = {
     handleToggleFeatured,
     handleStudioListGames,
     handleGetCloneInfo,
+    handleSubmitPublishRequest,
+    handleGetPublishStatuses,
 };

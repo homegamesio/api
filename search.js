@@ -1,330 +1,129 @@
-const http = require('http');
-const { ELASTICSEARCH_HOST, ELASTICSEARCH_PORT, ELASTICSEARCH_GAME_INDEX } = require('./config');
-const { mapElasticSearchGame } = require('./models');
+/**
+ * Game search / listing — backed by MongoDB.
+ *
+ * A game appears in public listings only if it has at least one
+ * gameVersions record with `published: true`.
+ */
 
-const elasticDeleteGame = (gameId) => new Promise((resolve, reject) => {
-    const options = {
-        hostname: ELASTICSEARCH_HOST,
-        port: ELASTICSEARCH_PORT,
-        path: `/games/_doc/${gameId}`,
-        method: 'DELETE',
-        headers: {}
-    };
+const { getMongoCollection } = require('./db');
 
-    const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-            data += chunk;
-        });
+// ---------------------------------------------------------------------------
+// List games (public catalog)
+// ---------------------------------------------------------------------------
 
-        res.on('end', () => {
-            const parsed = JSON.parse(data);
-            resolve();
-        });
-    });
-
-    req.on('error', (e) => {
-        console.error(`problem with request: ${e.message}`);
-        reject();
-    });
-
-    req.write('');
-    req.end();
-});
-
-const updateGameSearch = (gameData) => new Promise((resolve, reject) => {
-    console.log("STRINGIFYING");
-    console.log(gameData);
-    const body = JSON.stringify(gameData);
-
-    const options = {
-        hostname: ELASTICSEARCH_HOST,
-        port: ELASTICSEARCH_PORT,
-        path: `/games/_doc/${gameData.gameId}`,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-        },
-    };
-
-    const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-            data += chunk;
-        });
-
-        res.on('end', () => {
-            const parsed = JSON.parse(data);
-            resolve();
-        });
-    });
-
-    req.on('error', (e) => {
-        console.error(`problem with request: ${e.message}`);
-        reject();
-    });
-
-    req.write(body);
-    req.end();
-});
-
-const elasticSearchPost = (path, data) => new Promise((resolve, reject) => {
-    const body = JSON.stringify(data);
-
-    const options = {
-        hostname: ELASTICSEARCH_HOST,
-        port: ELASTICSEARCH_PORT,
-        path,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-        },
-    };
-
-    const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-            data += chunk;
-        });
-
-        res.on('end', () => {
-            const parsed = JSON.parse(data);
-            console.log('parsed"');
-            console.log(parsed);
-            resolve(parsed);
-        });
-    });
-
-    req.on('error', (e) => {
-        console.error(`problem with request: ${e.message}`);
-    });
-
-    req.write(body);
-    req.end();
-});
-
-const search = (indexes, query, offset = 0, limit = 10) => new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-        from: offset,
-        size: limit,
-        query: {
-            bool: {
-                should: [
-                    {
-                        "multi_match": {
-                            "query": query,
-                            "fields": ["developerId", "description", "name"],
-                            "fuzziness": "AUTO"
-                        }
-                    },
-                    {
-                        "wildcard": {
-                            "name": {
-                                value: `*${query}*`
-                            }
-                        }
-                    },
-                    {
-                        "wildcard": {
-                            "developerId": {
-                                value: `*${query}*`
-                            }
-                        }
-                    },
-                    {
-                        "wildcard": {
-                            "description": {
-                                value: `*${query}*`
-                            }
-                        }
-                    }
-                ]
+const listGames = (limit = 6, offset = 0, sort = null, query = null) => new Promise((resolve, reject) => {
+    // First find all gameIds that have at least one published version
+    getMongoCollection('gameVersions').then(versionCollection => {
+        versionCollection.distinct('gameId', { published: true }).then(publishedGameIds => {
+            if (publishedGameIds.length === 0) {
+                resolve({ games: [], pageCount: 0, total: 0 });
+                return;
             }
-        }
-    });
 
-    const options = {
-        hostname: ELASTICSEARCH_HOST,
-        port: ELASTICSEARCH_PORT,
-        path: `/${indexes}/_search`,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-        },
-    };
+            getMongoCollection('games').then(gameCollection => {
+                let dbQuery = { gameId: { $in: publishedGameIds } };
 
-    const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-            data += chunk;
-        });
+                if (query) {
+                    dbQuery = {
+                        $and: [
+                            { gameId: { $in: publishedGameIds } },
+                            {
+                                $or: [
+                                    { name: { $regex: query, $options: 'i' } },
+                                    { description: { $regex: query, $options: 'i' } },
+                                    { developerId: { $regex: query, $options: 'i' } },
+                                ]
+                            }
+                        ]
+                    };
+                }
 
-        res.on('end', () => {
-            const parsed = JSON.parse(data);
-            console.log('parsed"');
-            console.log(parsed);
-            resolve(parsed.hits);
-        });
-    });
-
-    req.on('error', (e) => {
-        console.error(`problem with request: ${e.message}`);
-    });
-
-    req.write(body);
-    req.end();
-});
-
-const getIndexData = (indexes, limit, offset) => new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-        from: offset,
-        size: limit
-    });
-
-    console.log('hfhfhfhf huh ' + ELASTICSEARCH_HOST + ' ::::: ' + ELASTICSEARCH_PORT);
-
-    console.log('what is indexes ' + indexes);
-    try {
-        console.log(indexes);
-        if (!indexes || !indexes.trim()) {
-            indexes = 'games';
-        }
-    } catch (err) {
-        console.warn(err);
-    }
-    console.log('dsjfkhdksjghdfg' + indexes);
-    const options = {
-        hostname: ELASTICSEARCH_HOST,
-        port: ELASTICSEARCH_PORT,
-        path: `/${indexes}/_search`,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-        },
-    };
-
-    const req = http.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-            data += chunk;
-        });
-
-        res.on('end', () => {
-            const parsed = JSON.parse(data);
-            console.log('parsed"');
-            console.log(parsed);
-            resolve(parsed.hits);
-        });
-    });
-
-    req.on('error', (e) => {
-        console.error(`problem with request: ${e.message}`);
-    });
-
-    req.write(body);
-    req.end();
-});
-
-const DEFAULT_GAME_ORDER = {
-    'game_name': {
-        order: 'asc'
-    }
-};
-
-const listGames = (limit = 6, offset = 0, sort = DEFAULT_GAME_ORDER, query = null, tags = []) => new Promise((resolve, reject) => {
-    if (query) {
-        search([ELASTICSEARCH_GAME_INDEX], query, Math.max(0, offset), limit).then((results) => {
-            const totalResults = results.total.value;
-            const pageCount = Math.ceil(totalResults / limit);
-            resolve({
-                games: results.hits.map(h => mapElasticSearchGame(h)),
-                pageCount,
-                total: totalResults,
-            });
+                gameCollection.countDocuments(dbQuery).then(total => {
+                    const pageCount = Math.ceil(total / limit);
+                    gameCollection.find(dbQuery)
+                        .sort({ created: -1 })
+                        .skip(Number(offset))
+                        .limit(Number(limit))
+                        .toArray()
+                        .then(games => {
+                            resolve({
+                                games: games.map(mapGame),
+                                pageCount,
+                                total,
+                            });
+                        }).catch(reject);
+                }).catch(reject);
+            }).catch(reject);
         }).catch(reject);
-    } else {
-        console.log('sdjkfsdjkfh ' + limit);
-        console.log(ELASTICSEARCH_GAME_INDEX);
-        getIndexData([ELASTICSEARCH_GAME_INDEX], limit, offset).then((results) => {
-            if (!results) {
-                resolve({ games: [], pageCount: 0 });
-            } else {
-                console.log('got results');
-                console.log(results.total);
-                const totalResults = results.total.value;
-                const pageCount = Math.ceil(totalResults / limit);
-
-                resolve({
-                    games: results.hits.map(h => mapElasticSearchGame(h)),
-                    pageCount,
-                    total: totalResults
-                });
-            }
-        }).catch(reject);
-    }
+    }).catch(reject);
 });
+
+// ---------------------------------------------------------------------------
+// List published games for a specific author
+// ---------------------------------------------------------------------------
 
 const listPublicGamesForAuthor = (params) => new Promise((resolve, reject) => {
-    console.log('fiufiufiufi elastic');
-    console.log(params);
-    const offset = params.offset || 0;
-    const limit = params.limit || 10;
-    const ting = {
-        from: offset,
-        size: limit,
-        query: {
-            'multi_match': {
-                query: params.author,
-                fields: ['developerId']
+    const { author, offset = 0, limit = 10 } = params;
+
+    getMongoCollection('gameVersions').then(versionCollection => {
+        versionCollection.distinct('gameId', { published: true }).then(publishedGameIds => {
+            if (publishedGameIds.length === 0) {
+                resolve({ games: [], pageCount: 0, total: 0 });
+                return;
             }
-        }
-    };
 
-    console.log('this is ting');
-    console.log(JSON.stringify(ting));
+            getMongoCollection('games').then(gameCollection => {
+                const dbQuery = {
+                    gameId: { $in: publishedGameIds },
+                    developerId: author,
+                };
 
-    elasticSearchPost('/games/_search', ting).then((results) => {
-        console.log("search results!');');");
-        console.log(results);
-        const totalResults = results.hits.total.value;
-        const pageCount = Math.ceil(totalResults / limit);
-        resolve({
-            total: totalResults,
-            games: results.hits.hits.map(h => mapElasticSearchGame(h)),
-            pageCount
-        });
+                gameCollection.countDocuments(dbQuery).then(total => {
+                    const pageCount = Math.ceil(total / limit);
+                    gameCollection.find(dbQuery)
+                        .sort({ created: -1 })
+                        .skip(Number(offset))
+                        .limit(Number(limit))
+                        .toArray()
+                        .then(games => {
+                            resolve({
+                                games: games.map(mapGame),
+                                pageCount,
+                                total,
+                            });
+                        }).catch(reject);
+                }).catch(reject);
+            }).catch(reject);
+        }).catch(reject);
     }).catch(reject);
 });
 
-const updateGameIndex = (gameId, getGame) => new Promise((resolve, reject) => {
-    getGame(gameId).then(gameData => {
-        console.log('need to post to elasticsearch');
-        console.log(gameData);
-        const gameBody = {
-            id: gameData.id,
-            description: gameData.description,
-            name: gameData.name,
-            created: gameData.created,
-            developerId: gameData.developerId,
-            thumbnail: gameData.thumbnail
-        };
-        elasticSearchPost('/games/_doc/' + gameId, gameBody).then(() => {
-            resolve();
-        }).catch(reject);
-    }).catch(reject);
+// ---------------------------------------------------------------------------
+// Delete game from search (now just a no-op since Mongo handles it)
+// ---------------------------------------------------------------------------
+
+const deleteGame = (gameId) => new Promise((resolve) => {
+    // Deleting from the games collection is handled in db.js.
+    // This function exists for API compatibility.
+    resolve();
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const mapGame = (game) => ({
+    id: game.gameId,
+    gameId: game.gameId,
+    name: game.name || '',
+    description: game.description || '',
+    developerId: game.developerId,
+    created: game.created,
+    thumbnail: game.thumbnail,
 });
 
 module.exports = {
-    elasticDeleteGame,
-    updateGameSearch,
-    elasticSearchPost,
-    search,
-    getIndexData,
     listGames,
     listPublicGamesForAuthor,
-    updateGameIndex,
+    deleteGame,
 };

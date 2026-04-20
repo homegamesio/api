@@ -515,21 +515,31 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
     });
 });
 
-const deleteGame = (gameId, elasticDeleteGame) => new Promise((resolve, reject) => {
-    elasticDeleteGame(gameId).then(() => {
-        console.log('deleted game from elastic thing');
+const deleteGame = (gameId, searchDeleteFn) => new Promise((resolve, reject) => {
+    const afterSearchDelete = () => {
         getMongoCollection('games').then(gameCollection => {
-            console.log('need to delete game from collection');
             gameCollection.deleteOne({ gameId }).then(() => {
                 console.log('deleted game from db');
                 getMongoCollection('gameVersions').then(gameVersions => {
-                    gameCollection.deleteMany({ gameId }).then(() => {
+                    gameVersions.deleteMany({ gameId }).then(() => {
                         console.log('deleted game versions');
-                    });
-                });
-            });
-        });
-    });
+                        getMongoCollection('publishRequests').then(publishRequests => {
+                            publishRequests.deleteMany({ gameId }).then(() => {
+                                console.log('deleted publish requests');
+                                resolve();
+                            }).catch(resolve);
+                        }).catch(resolve);
+                    }).catch(resolve);
+                }).catch(resolve);
+            }).catch(reject);
+        }).catch(reject);
+    };
+
+    if (searchDeleteFn) {
+        searchDeleteFn(gameId).then(afterSearchDelete).catch(afterSearchDelete);
+    } else {
+        afterSearchDelete();
+    }
 });
 
 module.exports = {
