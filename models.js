@@ -50,7 +50,8 @@ const assetResponse = (asset) => {
         created: asset.created,
         description: asset.description,
         size: asset.size,
-        type: asset.metadata?.['Content-Type'] || null
+        type: asset.metadata?.['Content-Type'] || null,
+        tags: asset.tags || [],
     };
 };
 

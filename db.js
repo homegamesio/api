@@ -223,14 +223,14 @@ const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((
                   '$or': [
                     { name: { '$regex': query, $options: 'i' } },
                     { description: { '$regex': query, $options: 'i' } },
-                    { assetId: { '$regex': query, $options: 'i' } }
+                    { assetId: { '$regex': query, $options: 'i' } },
+                    { tags: { '$regex': query, $options: 'i' } },
                   ]
                 }
               ]
             };
         }
         collection.countDocuments(dbQuery).then((count) => {
-            console.log('dsjfjsdfdsf');
             collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
                 resolve({ assets, count });
             }).catch(reject);
@@ -244,8 +244,22 @@ const createAssetRecord = (developerId, assetId, size, name, metadata, descripti
 
 const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(assetCollection => {
-        assetCollection.insertOne({ created: Date.now(), developerId, assetId, size, name, metadata, description }).then(() => resolve({assetId})).catch(reject);
+        assetCollection.insertOne({ created: Date.now(), developerId, assetId, size, name, metadata, description, tags: [] }).then(() => resolve({assetId})).catch(reject);
     });
+});
+
+const updateAssetTags = (developerId, assetId, tags) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(collection => {
+        collection.findOne({ assetId, developerId }).then(asset => {
+            if (!asset) {
+                reject('Asset not found');
+            } else {
+                collection.updateOne({ assetId, developerId }, { '$set': { tags: tags || [] } }).then(() => {
+                    resolve({ assetId, tags });
+                }).catch(reject);
+            }
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
@@ -565,6 +579,7 @@ module.exports = {
     listAssets,
     createAssetRecord,
     createMongoAssetRecord,
+    updateAssetTags,
     adminListPendingPublishRequests,
     adminAcknowledgeMessage,
     adminListSupportMessages,

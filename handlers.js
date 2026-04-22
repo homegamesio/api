@@ -15,6 +15,7 @@ const {
     adminListFailedPublishRequests, listPublishRequests, getGameDetails,
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
+    updateAssetTags,
 } = require('./db');
 const { listGames, listPublicGamesForAuthor, deleteGame: searchDeleteGame } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
@@ -678,6 +679,31 @@ const handleListAssets = (req, res, userId) => {
     });
 };
 
+const handleUpdateAssetTags = (req, res, userId, assetId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+        const { tags } = body;
+        if (!Array.isArray(tags)) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'tags must be an array of strings' }));
+            return;
+        }
+        // Sanitize: lowercase, trim, deduplicate, limit length
+        const cleanTags = [...new Set(tags.map(t => String(t).trim().toLowerCase()).filter(t => t.length > 0 && t.length <= 50))].slice(0, 20);
+        updateAssetTags(userId, assetId, cleanTags).then(result => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+        }).catch(err => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to update tags' }));
+        });
+    });
+};
+
 const handleGetDevProfile = (req, res, devId) => {
     getProfileInfo(devId).then(data => res.end(JSON.stringify(data))).catch(err => {
         res.end(JSON.stringify(err));
@@ -974,5 +1000,5 @@ module.exports = {
     handleAdminListSupportMessages, handleAdminListPendingPublishRequests,
     handleAdminListFailedPublishRequests, handleHealth,
     handleCreateSession, handleGetPublishedVersions,
-    handleRefreshToken,
+    handleRefreshToken, handleUpdateAssetTags,
 };
