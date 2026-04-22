@@ -23,6 +23,7 @@ const servicesRegex = '/services';
 const serviceRequestsRegex = '/service_requests/(\\S*)';
 const loginRegex = '/auth/login';
 const signupRegex = '/auth/signup';
+const refreshRegex = '/auth/refresh';
 const createBlogRegex = '/admin/blog';
 const blogRegex = '/blog';
 const blogDetailRegex = '/blog/(\\S*)';
@@ -135,6 +136,7 @@ const buildRequestHandlers = (h, s) => ({
         [createBlogRegex]: { requiresAuth: true, handle: h.handleCreateBlog },
         [signupRegex]: { handle: h.handleSignup },
         [loginRegex]: { handle: h.handleLogin },
+        [refreshRegex]: { requiresAuth: true, handle: h.handleRefreshToken },
         [requestActionRegex]: { requiresAuth: true, handle: h.handleRequestAction },
         [studioCreateGameRegex]: { requiresAuth: true, handle: s.handleStudioCreateGame },
         [studioSaveVersionRegex]: { requiresAuth: true, handle: s.handleSaveVersion },

@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const { Binary } = require('mongodb');
 
 const { MAX_SIZE } = require('./config');
-const { generateId, getHash } = require('./crypto');
+const { generateId, getHash, generateJwt } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
     getUserRecord, createSupportMessage, createBlogPost, getBlogPost, listBlogPosts,
@@ -55,8 +55,8 @@ const createGame = (developerId, thumbnailAssetId, fields, files) => {
     });
 };
 
-const updateProfileInfo = (userId, { description, image }) => {
-    return updateMongoProfileInfo(userId, { description, image }, createProfileImageTask);
+const updateProfileInfo = (userId, { description, image, btcAddress }) => {
+    return updateMongoProfileInfo(userId, { description, image, btcAddress });
 };
 
 // DELETE handlers
@@ -455,6 +455,12 @@ const handleLogin = (req, res) => {
     });
 };
 
+const handleRefreshToken = (req, res, userId) => {
+    const token = generateJwt(userId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ token, username: userId }));
+};
+
 const handleRequestAction = (req, res, userId, requestId) => {
     getUserRecord(userId).then(userData => {
         if (userData.isAdmin) {
@@ -518,7 +524,8 @@ const handleGetAsset = (req, res, assetId) => {
         } else {
             getMongoDocument(assetId).then((documentData) => {
                 if (documentData) {
-                    const headers = { 'Content-Disposition': `inline; filename=${encodeURI(assetData.name)}` };
+                    const safeName = (assetData.name || 'asset').replace(/["\r\n]/g, '');
+                    const headers = { 'Content-Disposition': `inline; filename="${encodeURI(safeName)}"` };
                     const storedContentType = assetData.metadata && assetData.metadata['Content-Type'];
                     if (storedContentType) {
                         headers['Content-Type'] = storedContentType;
@@ -967,4 +974,5 @@ module.exports = {
     handleAdminListSupportMessages, handleAdminListPendingPublishRequests,
     handleAdminListFailedPublishRequests, handleHealth,
     handleCreateSession, handleGetPublishedVersions,
+    handleRefreshToken,
 };

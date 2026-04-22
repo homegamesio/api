@@ -305,6 +305,92 @@ class MyGame extends Game {
 module.exports = MyGame;
 `
         }
+    },
+    'assets': {
+        label: 'Asset Game',
+        description: 'A game that demonstrates image assets. Click to move the image.',
+        files: {
+            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+const COLORS = Colors.COLORS;
+
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '1010',
+            author: 'Unknown',
+            description: 'A game with image assets'
+        };
+    }
+
+    constructor() {
+        super();
+        this.imagePos = { x: 40, y: 30 };
+        this.imageSize = { x: 20, y: 20 };
+
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE,
+            onClick: (playerId, x, y) => {
+                this.imagePos = { x: x - this.imageSize.x / 2, y: y - this.imageSize.y / 2 };
+                this.updateImage();
+            }
+        });
+
+        this.imageNode = new GameNode.Asset({
+            coordinates2d: ShapeUtils.rectangle(this.imagePos.x, this.imagePos.y, this.imageSize.x, this.imageSize.y),
+            assetInfo: {
+                'myImage': {
+                    pos: { ...this.imagePos },
+                    size: { ...this.imageSize }
+                }
+            }
+        });
+
+        this.base.addChild(this.imageNode);
+
+        this.label = new GameNode.Text({
+            textInfo: {
+                text: 'Click anywhere to move the image',
+                x: 50, y: 5,
+                size: 1.5, color: COLORS.BLACK, align: 'center'
+            }
+        });
+
+        this.base.addChild(this.label);
+    }
+
+    updateImage() {
+        this.imageNode.node.coordinates2d = ShapeUtils.rectangle(
+            this.imagePos.x, this.imagePos.y, this.imageSize.x, this.imageSize.y
+        );
+        const newAsset = this.imageNode.node.asset;
+        newAsset.myImage.pos = { ...this.imagePos };
+        newAsset.myImage.size = { ...this.imageSize };
+        this.imageNode.node.asset = newAsset;
+    }
+
+    handleNewPlayer({ playerId }) {}
+    handlePlayerDisconnect(playerId) {}
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+
+    getAssets() {
+        return {
+            'myImage': new Asset({
+                id: '1715f020b60ee74c53a1d8a311ce2622',
+                type: 'image'
+            })
+        };
+    }
+}
+
+module.exports = MyGame;
+`
+        }
     }
 };
 

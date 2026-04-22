@@ -148,13 +148,14 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
         collection.findOne({ userId }).then((userResponse) => {
             console.log('found user');
             console.log(userResponse);
-            const { userId, created, image, description } = userResponse;
+            const { userId, created, image, description, btcAddress } = userResponse;
 
                 resolve({
                     username: userId,
                     created,
                     image,
-                    description
+                    description,
+                    btcAddress: btcAddress || null,
                 });
         });
     }).catch(reject);
@@ -438,24 +439,28 @@ const listMyGames = (developerId, limit = 10, offset = 0, query) => new Promise(
     }).catch(reject);
 });
 
-const updateMongoProfileInfo = (userId, { description, image }, createProfileImageTask) => new Promise((resolve, reject) => {
+const updateMongoProfileInfo = (userId, { description, image, btcAddress }) => new Promise((resolve, reject) => {
     getMongoCollection('users').then(users => {
         users.findOne({ userId }).then((foundUser) => {
             if (!foundUser) {
                 reject('User not found');
             } else {
-                if (image) {
-                    createProfileImageTask(userId, image).catch(err => {
-                        console.error(err);
-                    });
-                }
+                const updates = {};
                 if (description && foundUser.description != description) {
-                    users.updateOne({ userId }, { "$set": { description } }).catch(reject).then(resolve);
+                    updates.description = description;
+                }
+                if (image !== undefined && foundUser.image != image) {
+                    updates.image = image || null;
+                }
+                if (btcAddress !== undefined && foundUser.btcAddress != btcAddress) {
+                    updates.btcAddress = btcAddress || null;
+                }
+
+                if (Object.keys(updates).length > 0) {
+                    users.updateOne({ userId }, { "$set": updates }).catch(reject).then(resolve);
                 } else {
                     resolve();
                 }
-
-                resolve();
             }
         }).catch(reject);
     }).catch(reject);
