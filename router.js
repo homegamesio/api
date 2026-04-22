@@ -63,6 +63,7 @@ const studioGetBuildsRegex = '/studio/games/(\\S*)/builds';
 const studioGetTemplatesRegex = '/studio/templates';
 const studioPublishRegex = '/studio/games/(\\S*)/publish';
 const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
+const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
 
@@ -143,6 +144,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioCreateGameRegex]: { requiresAuth: true, handle: s.handleStudioCreateGame },
         [studioSaveVersionRegex]: { requiresAuth: true, handle: s.handleSaveVersion },
         [studioRestoreVersionRegex]: { requiresAuth: true, handle: s.handleRestoreVersion },
+        [studioSetThumbnailRegex]: { requiresAuth: true, handle: s.handleSetGameThumbnail },
         [studioPublishRegex]: { requiresAuth: true, handle: s.handleSubmitPublishRequest },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [webhookPushRegex]: { handle: s.handleWebhookPush },

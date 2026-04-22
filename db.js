@@ -358,7 +358,8 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 created: gameResult.created,
                                 developerId: gameResult.developerId,
                                 thumbnail: gameResult.thumbnail,
-                                id: gameResult.gameId
+                                id: gameResult.gameId,
+                                featured: gameResult.featured || false,
                             },
                             versions: versions.map(v => {
                                 return {

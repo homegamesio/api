@@ -1116,6 +1116,7 @@ const handleStudioListGames = (req, res, userId) => {
                         forgejoRepo: g.forgejoRepo,
                         featured: g.featured || false,
                         created: g.created,
+                        thumbnail: g.thumbnail || null,
                     })),
                 }));
             });
@@ -1345,4 +1346,48 @@ module.exports = {
     handleGetCloneInfo,
     handleSubmitPublishRequest,
     handleGetPublishStatuses,
+    handleSetGameThumbnail,
 };
+
+// ---------------------------------------------------------------------------
+// Set game thumbnail
+// ---------------------------------------------------------------------------
+
+function handleSetGameThumbnail(req, res, userId, gameId) {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const { assetId } = body;
+        if (!assetId) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'assetId is required' }));
+            return;
+        }
+
+        getGame(gameId).then(game => {
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'Not your game' }));
+                return;
+            }
+
+            getMongoCollection('games').then(collection => {
+                collection.updateOne({ gameId }, { $set: { thumbnail: assetId } }).then(() => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ gameId, thumbnail: assetId }));
+                }).catch(err => {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to update thumbnail' }));
+                });
+            });
+        }).catch(err => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    });
+}

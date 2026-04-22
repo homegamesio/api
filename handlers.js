@@ -610,7 +610,7 @@ const handleListMyGames = (req, res, userId) => {
 
 const handleListGames = (req, res) => {
     const queryObject = url.parse(req.url, true).query;
-    let { query, author, offset, limit } = queryObject;
+    let { query, author, offset, limit, featured } = queryObject;
     if (!offset) { offset = 0; }
     if (!limit) { limit = 10; }
     if (author) {
@@ -623,7 +623,7 @@ const handleListGames = (req, res) => {
             res.end('error');
         });
     } else {
-        listGames(limit, offset, null, query).then(results => {
+        listGames(limit, offset, null, query, featured === 'true' ? true : null).then(results => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(results));
         }).catch(err => {

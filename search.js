@@ -11,7 +11,7 @@ const { getMongoCollection } = require('./db');
 // List games (public catalog)
 // ---------------------------------------------------------------------------
 
-const listGames = (limit = 6, offset = 0, sort = null, query = null) => new Promise((resolve, reject) => {
+const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = null) => new Promise((resolve, reject) => {
     // First find all gameIds that have at least one published version
     getMongoCollection('gameVersions').then(versionCollection => {
         versionCollection.distinct('gameId', { published: true }).then(publishedGameIds => {
@@ -23,19 +23,19 @@ const listGames = (limit = 6, offset = 0, sort = null, query = null) => new Prom
             getMongoCollection('games').then(gameCollection => {
                 let dbQuery = { gameId: { $in: publishedGameIds } };
 
+                if (featured) {
+                    dbQuery.featured = true;
+                }
+
                 if (query) {
-                    dbQuery = {
-                        $and: [
-                            { gameId: { $in: publishedGameIds } },
-                            {
-                                $or: [
-                                    { name: { $regex: query, $options: 'i' } },
-                                    { description: { $regex: query, $options: 'i' } },
-                                    { developerId: { $regex: query, $options: 'i' } },
-                                ]
-                            }
+                    const textFilter = {
+                        $or: [
+                            { name: { $regex: query, $options: 'i' } },
+                            { description: { $regex: query, $options: 'i' } },
+                            { developerId: { $regex: query, $options: 'i' } },
                         ]
                     };
+                    dbQuery = { $and: [dbQuery, textFilter] };
                 }
 
                 gameCollection.countDocuments(dbQuery).then(total => {
@@ -120,6 +120,7 @@ const mapGame = (game) => ({
     developerId: game.developerId,
     created: game.created,
     thumbnail: game.thumbnail,
+    featured: game.featured || false,
 });
 
 module.exports = {
