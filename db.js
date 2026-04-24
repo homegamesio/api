@@ -283,11 +283,12 @@ const adminAcknowledgeMessage = (messageId) => new Promise((resolve, reject) => 
 });
 
 const adminListSupportMessages = (page, limit) => new Promise((resolve, reject) => {
-    const actualLimit = limit || 10;
-    const skip = ( page - 1 ) * actualLimit;
+    const actualLimit = Number(limit) || 10;
+    const actualPage = Number(page) || 1;
+    const skip = (actualPage - 1) * actualLimit;
 
     getMongoCollection('supportMessages').then((collection) => {
-        collection.find({ status: 'PENDING' }).skip(skip).limit(actualLimit).toArray().then((results) => {
+        collection.find({ status: 'PENDING' }).sort({ created: -1 }).skip(skip).limit(actualLimit).toArray().then((results) => {
             resolve({ requests: results });
         }).catch(reject);
     }).catch(reject);

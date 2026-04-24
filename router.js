@@ -47,6 +47,8 @@ const assetsRegex = '/assets/(\\S*)';
 
 const createSessionRegex = '/sessions';
 const publishedVersionsRegex = '/games/(\\S*)/published-versions';
+const gameSourceTreeRegex = '/games/(\\S*)/source-tree';
+const gameSourceFileRegex = '/games/(\\S*)/source';
 const assetTagsRegex = '/assets/(\\S*)/tags';
 
 // Studio routes
@@ -161,6 +163,8 @@ const buildRequestHandlers = (h, s) => ({
         [serviceRequestsRegex]: { handle: h.handleGetServiceRequest },
         [listMyGamesRegex]: { requiresAuth: true, handle: h.handleListMyGames },
         [listGamesRegex]: { handle: h.handleListGames },
+        [gameSourceTreeRegex]: { handle: h.handleGetGameSourceTree },
+        [gameSourceFileRegex]: { handle: h.handleGetGameSourceFile },
         [publishedVersionsRegex]: { handle: h.handleGetPublishedVersions },
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },

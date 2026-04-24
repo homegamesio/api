@@ -734,19 +734,22 @@ const handleAdminListSupportMessages = (req, res, userId) => {
             const queryObject = url.parse(req.url, true).query;
             let { page, limit } = queryObject;
             adminListSupportMessages(page, limit).then(supportMessages => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(supportMessages));
             }).catch(err => {
-                console.log('failed to list publish requests');
-                console.error(err);
-                res.end('failed to list requests');
+                console.error('failed to list support messages', err);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'failed to list messages' }));
             });
         } else {
             console.log('user attempted to call admin API: ' + userId);
-            res.end('user is not an admin');
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'user is not an admin' }));
         }
     }).catch(err => {
-        console.log(err);
-        res.end('failed to get user data');
+        console.error(err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'failed to get user data' }));
     });
 };
 
@@ -1001,4 +1004,95 @@ module.exports = {
     handleAdminListFailedPublishRequests, handleHealth,
     handleCreateSession, handleGetPublishedVersions,
     handleRefreshToken, handleUpdateAssetTags,
+    handleGetGameSourceTree, handleGetGameSourceFile,
 };
+
+// ---------------------------------------------------------------------------
+// Public source viewing (read-only, published versions only)
+// ---------------------------------------------------------------------------
+
+const { forgejoRequest } = require('./forgejo');
+
+const verifyPublishedCommit = (gameId, commitSha) => new Promise((resolve, reject) => {
+    getMongoCollection('gameVersions').then(collection => {
+        collection.findOne({ gameId, commitSha, published: true }).then(version => {
+            if (!version) {
+                reject('Version not found or not published');
+            } else {
+                resolve(version);
+            }
+        }).catch(reject);
+    }).catch(reject);
+});
+
+function handleGetGameSourceTree(req, res, gameId) {
+    const queryObject = url.parse(req.url, true).query;
+    const ref = queryObject.ref;
+
+    if (!ref) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'ref parameter is required' }));
+        return;
+    }
+
+    verifyPublishedCommit(gameId, ref).then(() => {
+        getGame(gameId).then(game => {
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+
+            const [owner, repo] = game.forgejoRepo.split('/');
+            forgejoRequest('GET', `/repos/${owner}/${repo}/git/trees/${ref}?recursive=true`).then(tree => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(tree));
+            }).catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Failed to get file tree' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    }).catch(err => {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Access denied' }));
+    });
+}
+
+function handleGetGameSourceFile(req, res, gameId) {
+    const queryObject = url.parse(req.url, true).query;
+    const { path: filePath, ref } = queryObject;
+
+    if (!ref || !filePath) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'ref and path parameters are required' }));
+        return;
+    }
+
+    verifyPublishedCommit(gameId, ref).then(() => {
+        getGame(gameId).then(game => {
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+
+            const [owner, repo] = game.forgejoRepo.split('/');
+            forgejoRequest('GET', `/repos/${owner}/${repo}/contents/${filePath}?ref=${ref}`).then(fileData => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(fileData));
+            }).catch(err => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Failed to get file' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    }).catch(err => {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Access denied' }));
+    });
+}
