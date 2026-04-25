@@ -257,25 +257,15 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                             if (err1) {
                                 reject(err1);
                             } else {
-                                console.log('created channel');
                                 channel.assertQueue(JOB_QUEUE_NAME, {
                                     durable: true
                                 });
                                 acme.crypto.createPrivateKey().then(key => {
-                                    console.log('cool did that');
-                                    console.log(key);
-                                    console.log('this is name for cert i am generating');
-                                    console.log(`${getUserHash(publicIp)}.${CERT_DOMAIN}`);
                                     const requestId = generateId();
                                     acme.crypto.createCsr({
                                         commonName: `${getUserHash(publicIp)}.${CERT_DOMAIN}`
                                     }).then(([certKey, certCsr]) => {
-                                        console.log('ddddd hererere');
-                                        console.log(`${getUserHash(publicIp)}.${CERT_DOMAIN}`);
                                         channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
-                                        console.log('sent message');
-                                        console.log('this is key');
-                                        console.log(certKey.toString());
                                         resolve({ key: certKey.toString() });
                                     });
                                 });

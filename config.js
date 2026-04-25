@@ -43,8 +43,8 @@ const FORGEJO_USER_SECRET = process.env.FORGEJO_USER_SECRET || 'change-me-forgej
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
 const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
-// 50 MB max
-const MAX_SIZE = 50 * 1024 * 1024;
+// 6 MB max per asset
+const MAX_SIZE = 6 * 1024 * 1024;
 
 module.exports = {
     CERT_DOMAIN,

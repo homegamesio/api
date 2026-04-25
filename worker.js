@@ -4,26 +4,31 @@
  * Consumes messages from the `publish_requests` RabbitMQ queue.
  * For each request it:
  *   1. Looks up the game's Forgejo repo
- *   2. Checks that `index.js` exists at the given commit
- *   3. Checks that a GPLv3 LICENSE file exists (LICENSE, LICENSE.md, or LICENSE.txt)
- *   4. On success: creates a `gameVersions` record with `published: true`
- *   5. Updates the `publishRequests` record status
+ *   2. Downloads the repo archive at the given commit
+ *   3. Checks that `index.js` exists
+ *   4. Checks that a GPLv3 LICENSE file exists
+ *   5. Runs the game in a sandboxed Docker container (validate.js)
+ *      — loads the class, checks metadata, instantiates, runs for 5 seconds
+ *   6. On success: creates a `gameVersions` record with `published: true`
+ *   7. Updates the `publishRequests` record status
  *
  * Run:  node worker.js
  */
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const amqp = require('amqplib/callback_api');
 const { MongoClient } = require('mongodb');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
+const tar = require('tar');
 
 const {
     DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_NAME,
-    QUEUE_HOST, FORGEJO_URL, FORGEJO_ADMIN_TOKEN,
+    QUEUE_HOST,
 } = require('./config');
-const { forgejoRequest } = require('./forgejo');
+const { forgejoRequest, downloadArchive } = require('./forgejo');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -32,14 +37,27 @@ const { forgejoRequest } = require('./forgejo');
 const QUEUE_NAME = 'publish_requests';
 const RECONNECT_DELAY_MS = 5000;
 
+// Docker validation — requires homegames-runner image
+let validateGame = null;
+try {
+    const dockerHelper = require('homegames-common').dockerHelper;
+    validateGame = dockerHelper.validateGame;
+} catch (e) {
+    console.warn('[worker] Docker validation unavailable:', e.message);
+}
+
+console.log('whahaha');
+console.log(validateGame);
+
 // ---------------------------------------------------------------------------
 // GPLv3 reference text (loaded once at startup)
 // ---------------------------------------------------------------------------
 
-const GPL3_TEXT = fs.readFileSync(path.join(__dirname, 'gpl-3.0.txt'), 'utf-8');
+const GPL3_PATH = path.join(__dirname, 'gpl-3.0.txt');
+const GPL3_TEXT = fs.existsSync(GPL3_PATH) ? fs.readFileSync(GPL3_PATH, 'utf-8') : null;
 
 const normalizeWhitespace = (text) => text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-const GPL3_NORMALIZED = normalizeWhitespace(GPL3_TEXT);
+const GPL3_NORMALIZED = GPL3_TEXT ? normalizeWhitespace(GPL3_TEXT) : null;
 
 // ---------------------------------------------------------------------------
 // MongoDB
@@ -76,24 +94,44 @@ const generateId = () => crypto.createHash('md5').update(uuidv4()).digest('hex')
 // Forgejo helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Check whether a file exists at a given commit in a Forgejo repo.
- * Returns the file content (decoded from base64) or null if not found.
- */
 const getFileAtCommit = async (owner, repo, filepath, commitSha) => {
     try {
         const refParam = commitSha ? `?ref=${commitSha}` : '';
-        console.log(`[worker] Fetching file: ${owner}/${repo}/${filepath} @ ${commitSha}`);
         const data = await forgejoRequest('GET', `/repos/${owner}/${repo}/contents/${filepath}${refParam}`);
-        console.log(`[worker] Response for ${filepath}:`, data ? `got data (content length: ${(data.content || '').length})` : 'null/empty');
         if (data && data.content) {
             return Buffer.from(data.content, 'base64').toString('utf-8');
         }
         return null;
     } catch (err) {
-        console.log(`[worker] Error fetching ${filepath}:`, JSON.stringify(err));
         return null;
     }
+};
+
+/**
+ * Download and extract repo archive to a temp directory.
+ * Returns the path to the extracted directory.
+ */
+const downloadAndExtract = async (owner, repo, commitSha) => {
+    const archiveBuffer = await downloadArchive(owner, repo, commitSha);
+    const tmpDir = path.join(os.tmpdir(), `hg-validate-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    await new Promise((resolve, reject) => {
+        const { Readable } = require('stream');
+        const bufStream = new Readable();
+        bufStream.push(archiveBuffer);
+        bufStream.push(null);
+        bufStream.pipe(tar.x({ cwd: tmpDir }))
+            .on('finish', resolve)
+            .on('error', reject);
+    });
+
+    // tar.gz archives typically contain a top-level directory
+    const entries = fs.readdirSync(tmpDir);
+    if (entries.length === 1 && fs.statSync(path.join(tmpDir, entries[0])).isDirectory()) {
+        return path.join(tmpDir, entries[0]);
+    }
+    return tmpDir;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,8 +140,10 @@ const getFileAtCommit = async (owner, repo, filepath, commitSha) => {
 
 const LICENSE_FILENAMES = ['LICENSE', 'LICENSE.md', 'LICENSE.txt'];
 
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB — no single source file should be this large
+const MAX_TOTAL_SIZE = 20 * 1024 * 1024; // 20MB total repo size
+
 const validatePublishRequest = async (gameId, commitSha) => {
-    // Look up game to get Forgejo repo info
     const games = await getCollection('games');
     const game = await games.findOne({ gameId });
 
@@ -117,35 +157,134 @@ const validatePublishRequest = async (gameId, commitSha) => {
 
     const [owner, repo] = game.forgejoRepo.split('/');
 
+    // -----------------------------------------------------------------------
     // 1. Check index.js exists
+    // -----------------------------------------------------------------------
     const indexContent = await getFileAtCommit(owner, repo, 'index.js', commitSha);
     if (indexContent === null) {
         return { success: false, error: 'index.js not found at this version' };
     }
 
-    // 2. Check GPLv3 license
-    let licenseFound = false;
-    let licenseError = null;
+    // -----------------------------------------------------------------------
+    // 2. Basic source checks (before downloading the whole repo)
+    // -----------------------------------------------------------------------
+    if (Buffer.byteLength(indexContent, 'utf-8') > MAX_FILE_SIZE) {
+        return { success: false, error: 'index.js exceeds maximum file size (5MB)' };
+    }
 
-    for (const filename of LICENSE_FILENAMES) {
-        const licenseContent = await getFileAtCommit(owner, repo, filename, commitSha);
-        if (licenseContent !== null) {
-            const normalizedLicense = normalizeWhitespace(licenseContent);
-            if (normalizedLicense === GPL3_NORMALIZED) {
-                licenseFound = true;
-                break;
-            } else {
-                licenseError = `${filename} exists but is not the GPLv3 license`;
-            }
+    // Check for obviously dangerous patterns
+    const dangerousPatterns = [
+        { pattern: /child_process/i, msg: 'child_process usage is not allowed' },
+        { pattern: /\bexec\s*\(/i, msg: 'exec() is not allowed' },
+        { pattern: /\bspawn\s*\(/i, msg: 'spawn() is not allowed' },
+        { pattern: /\beval\s*\(/i, msg: 'eval() is not allowed' },
+        { pattern: /\bFunction\s*\(/i, msg: 'Function constructor is not allowed' },
+        { pattern: /require\s*\(\s*['"]fs['"]\s*\)/i, msg: 'Direct filesystem access (require("fs")) is not allowed' },
+        { pattern: /require\s*\(\s*['"]net['"]\s*\)/i, msg: 'Direct network access (require("net")) is not allowed' },
+        { pattern: /require\s*\(\s*['"]http['"]\s*\)/i, msg: 'Direct HTTP access (require("http")) is not allowed' },
+        { pattern: /require\s*\(\s*['"]https['"]\s*\)/i, msg: 'Direct HTTPS access (require("https")) is not allowed' },
+        { pattern: /require\s*\(\s*['"]dgram['"]\s*\)/i, msg: 'Direct UDP access (require("dgram")) is not allowed' },
+    ];
+
+    for (const { pattern, msg } of dangerousPatterns) {
+        if (pattern.test(indexContent)) {
+            return { success: false, error: msg };
         }
     }
 
-    if (!licenseFound) {
-        const error = licenseError || 'No LICENSE file found. A GPLv3 LICENSE file is required.';
-        return { success: false, error };
+    // -----------------------------------------------------------------------
+    // 3. Check GPLv3 license
+    // -----------------------------------------------------------------------
+    let licenseFound = false;
+    let licenseError = null;
+
+    if (GPL3_NORMALIZED) {
+        for (const filename of LICENSE_FILENAMES) {
+            const licenseContent = await getFileAtCommit(owner, repo, filename, commitSha);
+            if (licenseContent !== null) {
+                const normalizedLicense = normalizeWhitespace(licenseContent);
+                if (normalizedLicense === GPL3_NORMALIZED) {
+                    licenseFound = true;
+                    break;
+                } else {
+                    licenseError = `${filename} exists but is not the GPLv3 license`;
+                }
+            }
+        }
+
+        if (!licenseFound) {
+            const error = licenseError || 'No LICENSE file found. A GPLv3 LICENSE file is required.';
+            return { success: false, error };
+        }
     }
 
-    return { success: true };
+    // -----------------------------------------------------------------------
+    // 4. Download repo and run Docker validation
+    // -----------------------------------------------------------------------
+    let extractedPath = null;
+    try {
+        console.log(`[worker] Downloading archive for ${owner}/${repo} @ ${commitSha.substring(0, 7)}`);
+        extractedPath = await downloadAndExtract(owner, repo, commitSha);
+
+        // Check total repo size
+        let totalSize = 0;
+        const walkSize = (dir) => {
+            for (const entry of fs.readdirSync(dir)) {
+                const full = path.join(dir, entry);
+                const stat = fs.statSync(full);
+                if (stat.isDirectory()) {
+                    if (entry !== 'node_modules' && entry !== '.git') walkSize(full);
+                } else {
+                    totalSize += stat.size;
+                }
+            }
+        };
+        walkSize(extractedPath);
+
+        if (totalSize > MAX_TOTAL_SIZE) {
+            return { success: false, error: `Repository too large (${(totalSize / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_TOTAL_SIZE / 1024 / 1024}MB.` };
+        }
+
+        // Check index.js exists in extracted directory
+        if (!fs.existsSync(path.join(extractedPath, 'index.js'))) {
+            return { success: false, error: 'index.js not found in extracted archive' };
+        }
+
+        // Run Docker validation if available
+        if (validateGame) {
+            console.log(`[worker] Running Docker validation for ${owner}/${repo}`);
+
+            // Detect squish version from the source
+            let squishVersion = '135';
+            const squishMatch = indexContent.match(/squishVersion\s*:\s*['"](\w+)['"]/);
+            if (squishMatch) squishVersion = squishMatch[1];
+
+            const validationResult = await validateGame({
+                codePath: extractedPath,
+                squishVersion,
+                timeoutMs: 30000,
+            });
+
+            if (!validationResult.success) {
+                return { success: false, error: `Runtime validation failed: ${validationResult.error}` };
+            }
+
+            console.log(`[worker] Docker validation passed for ${owner}/${repo}`);
+        } else {
+            console.log(`[worker] Skipping Docker validation (not available)`);
+        }
+
+        return { success: true };
+    } finally {
+        // Clean up extracted files
+        if (extractedPath) {
+            // extractedPath might be a subdirectory of the temp dir
+            const tmpRoot = extractedPath.includes('hg-validate-')
+                ? extractedPath.split('hg-validate-')[0] + 'hg-validate-' + extractedPath.split('hg-validate-')[1].split('/')[0]
+                : extractedPath;
+            try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch (e) {}
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -165,14 +304,11 @@ const handlePublishRequest = async (message) => {
     const publishRequests = await getCollection('publishRequests');
 
     try {
-        // Mark as processing
         await publishRequests.updateOne({ requestId }, { $set: { status: 'PROCESSING' } });
 
-        // Validate
         const result = await validatePublishRequest(gameId, commitSha);
 
         if (result.success) {
-            // Create a published game version
             const gameVersions = await getCollection('gameVersions');
             const versionId = generateId();
 
@@ -185,14 +321,12 @@ const handlePublishRequest = async (message) => {
                 published: true,
             });
 
-            // Update publish request status
             await publishRequests.updateOne({ requestId }, {
                 $set: { status: 'PUBLISHED', versionId, completedAt: Date.now() }
             });
 
             console.log(`[worker] ✓ Published version ${versionId} for game ${gameId}`);
         } else {
-            // Update publish request with failure
             await publishRequests.updateOne({ requestId }, {
                 $set: { status: 'FAILED', error: result.error, completedAt: Date.now() }
             });
@@ -280,7 +414,6 @@ const startConsumer = () => {
 const main = async () => {
     console.log('[worker] Starting publish-request validation worker');
 
-    // Verify MongoDB
     try {
         const client = getMongoClient();
         await client.connect();
@@ -290,7 +423,6 @@ const main = async () => {
         process.exit(1);
     }
 
-    // Start consuming
     startConsumer();
 };
 

@@ -238,6 +238,14 @@ const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((
     }).catch(reject);
 });
 
+const MAX_ASSETS_PER_USER = 100;
+
+const getAssetCount = (developerId) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(collection => {
+        collection.countDocuments({ developerId }).then(resolve).catch(reject);
+    }).catch(reject);
+});
+
 const createAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
    createMongoAssetRecord(developerId, assetId, size, name, metadata, description).then(resolve).catch(reject);
 });
@@ -579,6 +587,8 @@ module.exports = {
     getGame,
     updateGame,
     listAssets,
+    getAssetCount,
+    MAX_ASSETS_PER_USER,
     createAssetRecord,
     createMongoAssetRecord,
     updateAssetTags,

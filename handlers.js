@@ -5,12 +5,52 @@ const { v4: uuidv4 } = require('uuid');
 const { Binary } = require('mongodb');
 
 const { MAX_SIZE } = require('./config');
+
+// ---------------------------------------------------------------------------
+// Rate limiters
+// ---------------------------------------------------------------------------
+const _rateLimiters = {};
+
+const rateLimit = (key, windowMs, max) => {
+    if (!_rateLimiters[key]) {
+        _rateLimiters[key] = { clients: new Map() };
+        // Evict stale entries periodically
+        const interval = setInterval(() => {
+            const now = Date.now();
+            for (const [ip, entry] of _rateLimiters[key].clients) {
+                if (now - entry.start > windowMs * 2) _rateLimiters[key].clients.delete(ip);
+            }
+        }, windowMs);
+        if (interval.unref) interval.unref();
+    }
+    return (ip) => {
+        const now = Date.now();
+        const clients = _rateLimiters[key].clients;
+        let entry = clients.get(ip);
+        if (!entry || now - entry.start > windowMs) {
+            entry = { count: 0, start: now };
+            clients.set(ip, entry);
+        }
+        entry.count++;
+        return entry.count <= max;
+    };
+};
+
+const getClientIP = (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return forwarded.split(',')[0].trim();
+    return req.socket?.remoteAddress || 'unknown';
+};
+
+const assetUploadLimiter = rateLimit('asset-upload', 60 * 1000, 5);     // 5 uploads per minute per IP
+const signupLimiter = rateLimit('signup', 24 * 60 * 60 * 1000, 1);       // 1 signup per 24 hours per IP
 const { generateId, getHash, generateJwt } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
     getUserRecord, createSupportMessage, createBlogPost, getBlogPost, listBlogPosts,
     getMongoAsset, getMongoDocument, getMongoCollection, uploadMongo,
     getProfileInfo, getGame, updateGame, listAssets, createAssetRecord,
+    getAssetCount, MAX_ASSETS_PER_USER,
     adminListPendingPublishRequests, adminAcknowledgeMessage, adminListSupportMessages,
     adminListFailedPublishRequests, listPublishRequests, getGameDetails,
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
@@ -237,39 +277,57 @@ const handleCreateGame = (req, res, userId) => {
 };
 
 const handleCreateAsset = (req, res, userId) => {
-    const form = new multiparty.Form();
-    form.parse(req, (err, fields, files) => {
-        if (!files) {
-            res.end('no');
-        } else {
-            const fileValues = Object.values(files);
-            let hack = false;
+    const ip = getClientIP(req);
+    if (!assetUploadLimiter(ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Upload limit: 5 per minute. Please wait.' }));
+        return;
+    }
 
-            const uploadedFiles = fileValues[0].map(f => {
-                if (hack) {
-                    return;
-                }
-                hack = true;
-
-                if (f.size > MAX_SIZE) {
-                    res.writeHead(400);
-                    res.end('File size exceeds ' + MAX_SIZE + ' bytes');
-                } else {
-                    const assetId = getHash(uuidv4());
-                    const description = fields?.description?.[0] || '';
-                    createAssetRecord(userId, assetId, f.size, f.originalFilename, {
-                        'Content-Type': f.headers['content-type']
-                    }, description).then(() => {
-                        uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, f.headers['content-type']).then((assetId) => {
-                            res.writeHead(200, {
-                                'Content-Type': 'application/json'
-                            });
-                            res.end(JSON.stringify({ assetId }));
-                        });
-                    });
-                }
-            });
+    Promise.all([getAssetCount(userId), getUserRecord(userId)]).then(([count, userData]) => {
+        if (count >= MAX_ASSETS_PER_USER && !userData?.isAdmin) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Asset limit reached (${MAX_ASSETS_PER_USER} max). Delete unused assets to upload more.` }));
+            return;
         }
+        const form = new multiparty.Form();
+        form.parse(req, (err, fields, files) => {
+            if (!files) {
+                res.end('no');
+            } else {
+                const fileValues = Object.values(files);
+                let hack = false;
+
+                const uploadedFiles = fileValues[0].map(f => {
+                    if (hack) {
+                        return;
+                    }
+                    hack = true;
+
+                    if (f.size > MAX_SIZE) {
+                        res.writeHead(400);
+                        res.end('File size exceeds ' + MAX_SIZE + ' bytes');
+                    } else {
+                        const assetId = getHash(uuidv4());
+                        const description = fields?.description?.[0] || '';
+                        createAssetRecord(userId, assetId, f.size, f.originalFilename, {
+                            'Content-Type': f.headers['content-type']
+                        }, description).then(() => {
+                            uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, f.headers['content-type']).then((assetId) => {
+                                res.writeHead(200, {
+                                    'Content-Type': 'application/json'
+                                });
+                                res.end(JSON.stringify({ assetId }));
+                            });
+                        });
+                    }
+                });
+            }
+        });
+    }).catch(err => {
+        console.error('Error checking asset count:', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal error' }));
     });
 };
 
@@ -409,7 +467,13 @@ const handleCreateBlog = (req, res, userId) => {
 };
 
 const handleSignup = (req, res) => {
-    console.log('hmmmm');
+    const ip = getClientIP(req);
+    if (!signupLimiter(ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Account creation is limited to one per day. Please try again later.' }));
+        return;
+    }
+
     getReqBody(req, (_data) => {
         let signupBody = {};
         let err = false;
