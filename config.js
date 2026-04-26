@@ -4,14 +4,6 @@ const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
 const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 
-const SourceType = {
-    GITHUB: 'GITHUB'
-};
-
-const poolData = {
-    UserPoolId: process.env.COGNITO_USER_POOL_ID
-};
-
 const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
 const DB_TYPE = process.env.DB_TYPE || 'local';
@@ -36,7 +28,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'hello world!';
 
 const AUTH_TYPE = process.env.AUTH_TYPE || 'mongo';
 
-const FORGEJO_URL = process.env.FORGEJO_URL || 'http://52.32.110.71:3000';
+const FORGEJO_URL = process.env.FORGEJO_URL || 'http://localhost:3000';
 const FORGEJO_ADMIN_TOKEN = process.env.FORGEJO_ADMIN_TOKEN || '';
 const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
 const FORGEJO_USER_SECRET = process.env.FORGEJO_USER_SECRET || 'change-me-forgejo-user-secret';
@@ -49,8 +41,6 @@ const MAX_SIZE = 6 * 1024 * 1024;
 module.exports = {
     CERT_DOMAIN,
     JOB_QUEUE_NAME,
-    SourceType,
-    poolData,
     CERTS_ENABLED,
     DB_TYPE,
     AWS_ROUTE_53_HOSTED_ZONE_ID,

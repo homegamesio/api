@@ -5,10 +5,6 @@ const { generateId, hashValue } = require('./crypto');
 const { mapBlogPost, mapMongoGame } = require('./models');
 
 const getMongoClient = () => {
-    console.log('dbdbdbd');
-    console.log(DB_USERNAME);
-    console.log(DB_PASSWORD);
-    console.log(DB_HOST);
     const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
     const params = {};
     if (DB_USERNAME) {
@@ -144,10 +140,7 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
     client.connect().then(() => {
         const db = client.db(DB_NAME);
         const collection = db.collection('users');
-        console.log('for ' + userId);
         collection.findOne({ userId }).then((userResponse) => {
-            console.log('found user');
-            console.log(userResponse);
             const { userId, created, image, description, btcAddress } = userResponse;
 
                 resolve({
@@ -202,8 +195,6 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
                             developerId: game.developerId,
                             name: game.name
                         };
-                        console.log(game);
-                        console.log("fdsfds");
                         resolve(gameResult);
                     }).catch(reject);
                 });
@@ -281,8 +272,6 @@ const adminListPendingPublishRequests = () => new Promise((resolve, reject) => {
 const adminAcknowledgeMessage = (messageId) => new Promise((resolve, reject) => {
     getMongoCollection('supportMessages').then((collection) => {
         collection.findOne({ id: messageId }).then(supportMessage => {
-            console.log('found message');
-            console.log(supportMessage);
             if (supportMessage) {
                 collection.updateOne({ id: messageId }, { "$set": { 'status': 'ACKNOWLEDGED' } }).then(resolve).catch(reject);
             }
@@ -332,7 +321,6 @@ const listGamesForAuthor = (params) => new Promise((resolve, reject) => {
 });
 
 const mongoListGamesForAuthor = ({ author, page, limit }) => new Promise((resolve, reject) => {
-    console.log("gonna list games");
     getMongoCollection('games').then(collection => {
         const actualLimit = limit || 10;
         const skip = ( page - 1 ) * actualLimit;
@@ -358,8 +346,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
-                        console.log("VIERIEIREIRIER");
-                        console.log(versions);
                         resolve({
                             game: {
                                 name: gameResult.name,
@@ -388,7 +374,6 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
 });
 
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
-    console.log('looking for ' + requestId);
     getMongoCollection('publishRequests').then((collection) => {
         collection.findOne({ requestId }).then((result) => {
             if (!result) {
@@ -425,8 +410,6 @@ const adminPublishRequestAction = (requestId, action, message) => new Promise((r
 
     getPublishRequest(requestId).then(requestData => {
         const gameId = requestData.gameId;
-        console.log("this is publish request");
-        console.log(requestData);
         getMongoCollection('publishRequests').then((publishRequests) => {
             publishRequests.updateOne({ requestId }, { "$set": { 'status': newStatus, adminMessage: message } }).catch(reject).then(() => {
                 getMongoCollection('gameVersions').then(gameVersions => {
@@ -518,8 +501,6 @@ const submitContentRequest = (request, ip, createContentRequestFn) => new Promis
 const getCertRecord = (publicIp) => new Promise((resolve, reject) => {
     getMongoCollection('certs').then((collection) => {
         collection.findOne({ ip: publicIp }).then((result) => {
-            console.log('reuslt!');
-            console.log(result);
             resolve(result);
         });
     });
@@ -548,13 +529,10 @@ const deleteGame = (gameId, searchDeleteFn) => new Promise((resolve, reject) => 
     const afterSearchDelete = () => {
         getMongoCollection('games').then(gameCollection => {
             gameCollection.deleteOne({ gameId }).then(() => {
-                console.log('deleted game from db');
                 getMongoCollection('gameVersions').then(gameVersions => {
                     gameVersions.deleteMany({ gameId }).then(() => {
-                        console.log('deleted game versions');
                         getMongoCollection('publishRequests').then(publishRequests => {
                             publishRequests.deleteMany({ gameId }).then(() => {
-                                console.log('deleted publish requests');
                                 resolve();
                             }).catch(resolve);
                         }).catch(resolve);
