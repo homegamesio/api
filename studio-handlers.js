@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
-const { API_PUBLIC_URL, FORGEJO_USER_SECRET } = require('./config');
+const { API_PUBLIC_URL, FORGEJO_USER_SECRET, FORGEJO_WEBHOOK_SECRET } = require('./config');
 const { generateId } = require('./crypto');
 const {
     getUserRecord, getGame, getGameDetails, getMongoCollection,
@@ -501,7 +501,7 @@ const handleStudioCreateGame = (req, res, userId) => {
         ensureForgejoUser(userId).then(() => {
             createRepo(userId, repoName).then(repo => {
                 const webhookUrl = `${API_PUBLIC_URL}/webhook/push`;
-                createWebhook(userId, repoName, webhookUrl)
+                createWebhook(userId, repoName, webhookUrl, FORGEJO_WEBHOOK_SECRET)
                     .then(() => finishGameCreation())
                     .catch(err => {
                         console.error('Failed to create webhook', err);
@@ -911,6 +911,24 @@ const handleWebhookPush = (req, res) => {
             res.writeHead(400);
             res.end('Error reading request');
             return;
+        }
+
+        // Verify webhook signature
+        if (FORGEJO_WEBHOOK_SECRET) {
+            const signature = req.headers['x-forgejo-signature'];
+            if (!signature) {
+                res.writeHead(403);
+                res.end('Missing signature');
+                return;
+            }
+            const expected = crypto.createHmac('sha256', FORGEJO_WEBHOOK_SECRET)
+                .update(_body)
+                .digest('hex');
+            if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+                res.writeHead(403);
+                res.end('Invalid signature');
+                return;
+            }
         }
 
         let payload;

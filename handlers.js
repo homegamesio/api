@@ -44,6 +44,7 @@ const getClientIP = (req) => {
 
 const assetUploadLimiter = rateLimit('asset-upload', 60 * 1000, 5);     // 5 uploads per minute per IP
 const signupLimiter = rateLimit('signup', 24 * 60 * 60 * 1000, 1);       // 1 signup per 24 hours per IP
+const sessionCreateLimiter = rateLimit('session-create', 60 * 1000, 1);  // 1 session per minute per IP
 const { generateId, getHash, generateJwt } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
@@ -954,6 +955,13 @@ const handleHealth = (req, res) => {
 // ---------------------------------------------------------------------------
 
 const handleCreateSession = (req, res) => {
+    const ip = getClientIP(req);
+    if (!sessionCreateLimiter(ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Session limit: 1 per minute. Please wait.' }));
+        return;
+    }
+
     const http = require('http');
     const fs = require('fs');
     const os = require('os');
@@ -1017,26 +1025,28 @@ const handleCreateSession = (req, res) => {
 
                 // Download the archive from Forgejo
                 downloadArchive(owner, repo, sha).then(archiveBuf => {
-                    // Write to temp file and extract
+                    const tar = require('tar');
+                    const { Readable } = require('stream');
+
+                    // Extract archive to temp directory
                     const tmpDir = path.join(os.tmpdir(), `hg-game-${gameId}-${sha.substring(0, 7)}-${Date.now()}`);
                     fs.mkdirSync(tmpDir, { recursive: true });
-                    const tarPath = path.join(tmpDir, 'archive.tar.gz');
-                    fs.writeFileSync(tarPath, archiveBuf);
 
-                    // Extract tar.gz
-                    const { execSync } = require('child_process');
-                    try {
-                        execSync(`tar -xzf ${tarPath} -C ${tmpDir}`, { stdio: 'pipe' });
-                    } catch (extractErr) {
-                        console.error('[sessions] Failed to extract archive:', extractErr.message);
-                        res.writeHead(500);
-                        res.end(JSON.stringify({ error: 'Failed to extract game archive' }));
-                        return;
-                    }
+                    const bufStream = new Readable();
+                    bufStream.push(archiveBuf);
+                    bufStream.push(null);
+
+                    bufStream.pipe(tar.x({ cwd: tmpDir }))
+                        .on('error', (extractErr) => {
+                            console.error('[sessions] Failed to extract archive:', extractErr.message);
+                            res.writeHead(500);
+                            res.end(JSON.stringify({ error: 'Failed to extract game archive' }));
+                        })
+                        .on('finish', () => {
 
                     // Find the extracted directory (Forgejo wraps in a subdir like "reponame")
                     const entries = fs.readdirSync(tmpDir).filter(e => {
-                        return e !== 'archive.tar.gz' && fs.statSync(path.join(tmpDir, e)).isDirectory();
+                        return fs.statSync(path.join(tmpDir, e)).isDirectory();
                     });
 
                     const gamePath = entries.length > 0
@@ -1092,6 +1102,8 @@ const handleCreateSession = (req, res) => {
 
                     homenamesReq.write(postBody);
                     homenamesReq.end();
+
+                    }); // end tar on('finish')
 
                 }).catch(archiveErr => {
                     console.error('[sessions] Failed to download archive:', archiveErr);

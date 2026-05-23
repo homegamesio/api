@@ -36,7 +36,7 @@ const verifyToken = (token) => new Promise((resolve, reject) => {
             if (!payload.iat || payload.iat + (15 * 60 * 1000) <= Date.now()) {
                 reject('Expired token');
             } else {
-                if (validSignature == tokenSignature) {
+                if (crypto.timingSafeEqual(Buffer.from(validSignature), Buffer.from(tokenSignature))) {
                     resolve(payload);
                 } else {
                     reject('Invalid token');

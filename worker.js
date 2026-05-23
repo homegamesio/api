@@ -172,25 +172,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
         return { success: false, error: 'index.js exceeds maximum file size (5MB)' };
     }
 
-    // Check for obviously dangerous patterns
-    const dangerousPatterns = [
-        { pattern: /child_process/i, msg: 'child_process usage is not allowed' },
-        { pattern: /\bexec\s*\(/i, msg: 'exec() is not allowed' },
-        { pattern: /\bspawn\s*\(/i, msg: 'spawn() is not allowed' },
-        { pattern: /\beval\s*\(/i, msg: 'eval() is not allowed' },
-        { pattern: /\bFunction\s*\(/i, msg: 'Function constructor is not allowed' },
-        { pattern: /require\s*\(\s*['"]fs['"]\s*\)/i, msg: 'Direct filesystem access (require("fs")) is not allowed' },
-        { pattern: /require\s*\(\s*['"]net['"]\s*\)/i, msg: 'Direct network access (require("net")) is not allowed' },
-        { pattern: /require\s*\(\s*['"]http['"]\s*\)/i, msg: 'Direct HTTP access (require("http")) is not allowed' },
-        { pattern: /require\s*\(\s*['"]https['"]\s*\)/i, msg: 'Direct HTTPS access (require("https")) is not allowed' },
-        { pattern: /require\s*\(\s*['"]dgram['"]\s*\)/i, msg: 'Direct UDP access (require("dgram")) is not allowed' },
-    ];
 
-    for (const { pattern, msg } of dangerousPatterns) {
-        if (pattern.test(indexContent)) {
-            return { success: false, error: msg };
-        }
-    }
 
     // -----------------------------------------------------------------------
     // 3. Check GPLv3 license
@@ -226,20 +208,24 @@ const validatePublishRequest = async (gameId, commitSha) => {
         console.log(`[worker] Downloading archive for ${owner}/${repo} @ ${commitSha.substring(0, 7)}`);
         extractedPath = await downloadAndExtract(owner, repo, commitSha);
 
-        // Check total repo size
+        // Check total repo size and collect all JS files
         let totalSize = 0;
-        const walkSize = (dir) => {
+        const jsFiles = [];
+        const walkDir = (dir) => {
             for (const entry of fs.readdirSync(dir)) {
                 const full = path.join(dir, entry);
                 const stat = fs.statSync(full);
                 if (stat.isDirectory()) {
-                    if (entry !== 'node_modules' && entry !== '.git') walkSize(full);
+                    if (entry !== 'node_modules' && entry !== '.git') walkDir(full);
                 } else {
                     totalSize += stat.size;
+                    if (entry.endsWith('.js')) {
+                        jsFiles.push(full);
+                    }
                 }
             }
         };
-        walkSize(extractedPath);
+        walkDir(extractedPath);
 
         if (totalSize > MAX_TOTAL_SIZE) {
             return { success: false, error: `Repository too large (${(totalSize / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_TOTAL_SIZE / 1024 / 1024}MB.` };
@@ -248,6 +234,25 @@ const validatePublishRequest = async (gameId, commitSha) => {
         // Check index.js exists in extracted directory
         if (!fs.existsSync(path.join(extractedPath, 'index.js'))) {
             return { success: false, error: 'index.js not found in extracted archive' };
+        }
+
+        // AST-based scan of all JS files for dangerous patterns
+        const { scanSource } = require('./ast-scanner');
+
+        for (const jsFile of jsFiles) {
+            const relPath = path.relative(extractedPath, jsFile);
+            const content = fs.readFileSync(jsFile, 'utf-8');
+
+            if (Buffer.byteLength(content, 'utf-8') > MAX_FILE_SIZE) {
+                return { success: false, error: `${relPath} exceeds maximum file size (5MB)` };
+            }
+
+            const scanResult = scanSource(content, relPath);
+            if (!scanResult.safe) {
+                const firstErrors = scanResult.errors.slice(0, 3);
+                const summary = firstErrors.map(e => `${e.file}:${e.line}: ${e.msg}`).join('; ');
+                return { success: false, error: summary };
+            }
         }
 
         // Run Docker validation if available
@@ -271,7 +276,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
 
             console.log(`[worker] Docker validation passed for ${owner}/${repo}`);
         } else {
-            console.log(`[worker] Skipping Docker validation (not available)`);
+            return { success: false, error: 'Docker validation is required but not available' };
         }
 
         return { success: true };

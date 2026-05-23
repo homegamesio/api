@@ -4,7 +4,11 @@ const { DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_NAME } = require('./confi
 const { generateId, hashValue } = require('./crypto');
 const { mapBlogPost, mapMongoGame } = require('./models');
 
+let _mongoClient = null;
+
 const getMongoClient = () => {
+    if (_mongoClient) return _mongoClient;
+
     const uri = DB_USERNAME ? `mongodb://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}` : `mongodb://${DB_HOST}:${DB_PORT}/${DB_NAME}`;
     const params = {};
     if (DB_USERNAME) {
@@ -15,7 +19,8 @@ const getMongoClient = () => {
         params.authSource = 'admin';
     }
 
-    return new MongoClient(uri, params);
+    _mongoClient = new MongoClient(uri, params);
+    return _mongoClient;
 };
 
 const getMongoCollection = (collectionName) => new Promise((resolve, reject) => {

@@ -91,14 +91,18 @@ const createRepo = (ownerUsername, repoName) => {
     }, { sudo: ownerUsername });
 };
 
-const createWebhook = (owner, repo, webhookUrl) => {
+const createWebhook = (owner, repo, webhookUrl, secret) => {
+    const config = {
+        url: webhookUrl,
+        content_type: 'json',
+    };
+    if (secret) {
+        config.secret = secret;
+    }
     return forgejoRequest('POST', `/repos/${owner}/${repo}/hooks`, {
         type: 'forgejo',
         active: true,
-        config: {
-            url: webhookUrl,
-            content_type: 'json',
-        },
+        config,
         events: ['push'],
     }, { sudo: owner });
 };
