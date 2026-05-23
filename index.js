@@ -8,7 +8,7 @@ const models = require('./models');
 const { dispatchRequest, buildRequestHandlers } = require('./router');
 const handlers = require('./handlers');
 const studioHandlers = require('./studio-handlers');
-const { updateCachedMap, getReqBody, getPublicIp, validateServiceRequest } = require('./helpers');
+const { getReqBody, getPublicIp, validateServiceRequest } = require('./helpers');
 
 // ---------------------------------------------------------------------------
 // Server
@@ -27,15 +27,6 @@ const server = http.createServer((req, res) => {
 // ---------------------------------------------------------------------------
 
 if (require.main === module) {
-    const _CENTROIDS = fs.readFileSync('centroids.json');
-    const CENTROIDS = JSON.parse(_CENTROIDS);
-
-    setInterval(() => {
-        updateCachedMap(CENTROIDS).then((entries) => {
-            handlers.setGameMaps(entries);
-        });
-    }, 1000 * 5);
-
     server.listen(process.env.PORT || 80);
 }
 

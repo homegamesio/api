@@ -55,7 +55,7 @@ const {
     adminListFailedPublishRequests, listPublishRequests, getGameDetails,
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
-    updateAssetTags,
+    updateAssetTags, listPublicAssets, updateAsset, deleteAsset,
 } = require('./db');
 const { listGames, listPublicGamesForAuthor, deleteGame: searchDeleteGame } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
@@ -104,13 +104,38 @@ const updateProfileInfo = (userId, { description, image, btcAddress }) => {
 
 const handleDeleteGame = (req, res, userId, gameId) => {
     getUserRecord(userId).then(userData => {
-        if (userData.isAdmin) {
-            console.log('wanna delete ' + gameId);
-            deleteGame(gameId, searchDeleteGame).then(() => res.end(''));
-        } else {
+        if (!userData.isAdmin) {
             console.warn(`user ${userId} tried to delete game ${gameId}`);
-            res.end('');
+            res.statusCode = 403;
+            res.end(JSON.stringify({ error: 'Not an admin' }));
+            return;
         }
+
+        getGame(gameId).then((game) => {
+            deleteGame(gameId, searchDeleteGame).then(() => {
+                const forgejoCleanup = game.forgejoRepo
+                    ? (() => {
+                        const { deleteRepo } = require('./forgejo');
+                        const [owner, repo] = game.forgejoRepo.split('/');
+                        return deleteRepo(owner, repo).catch((err) => {
+                            console.warn(`Forgejo delete failed for ${game.forgejoRepo}`, err);
+                        });
+                    })()
+                    : Promise.resolve();
+
+                forgejoCleanup.then(() => {
+                    res.statusCode = 200;
+                    res.end(JSON.stringify({ deleted: true, gameId }));
+                });
+            }).catch((err) => {
+                console.error(`Failed to delete game ${gameId}`, err);
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: 'Delete failed' }));
+            });
+        }).catch(() => {
+            res.statusCode = 404;
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
     });
 };
 
@@ -309,10 +334,11 @@ const handleCreateAsset = (req, res, userId) => {
                         res.end('File size exceeds ' + MAX_SIZE + ' bytes');
                     } else {
                         const assetId = getHash(uuidv4());
-                        const description = fields?.description?.[0] || '';
+                        const description = (fields?.description?.[0] || '').trim().substring(0, 80);
+                        const isPublic = fields?.public?.[0] === 'true' || fields?.public?.[0] === true;
                         createAssetRecord(userId, assetId, f.size, f.originalFilename, {
                             'Content-Type': f.headers['content-type']
-                        }, description).then(() => {
+                        }, description, isPublic).then(() => {
                             uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, f.headers['content-type']).then((assetId) => {
                                 res.writeHead(200, {
                                     'Content-Type': 'application/json'
@@ -429,40 +455,6 @@ const handleServices = (req, res) => {
                 res.end(JSON.stringify(err));
             });
         }
-    });
-};
-
-const handleSubmitPublishRequest = (req, res, userId) => {
-    getReqBody(req, (_data) => {
-        const data = JSON.parse(_data);
-        const { requestId } = data;
-        getPublishRequest(requestId).then(requestData => {
-            updatePublishRequestState(requestId, requestData.game_id, requestData.source_info_hash, 'PENDING_PUBLISH_APPROVAL').then(() => {
-                res.end('ok');
-            }).catch(err => {
-                res.end(err.toString());
-            });
-        }).catch(err => {
-            res.end(err.toString());
-        });
-    });
-};
-
-const handleCreateBlog = (req, res, userId) => {
-    getUserRecord(userId).then(userData => {
-        if (!userData.isAdmin) {
-            res.writeHead(401);
-            res.end('Not an admin');
-        } else {
-            getReqBody(req, (_data) => {
-                createBlogPost(userId, JSON.parse(_data)).then(() => {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(_data);
-                });
-            });
-        }
-    }).catch(err => {
-        res.end(err.toString());
     });
 };
 
@@ -740,6 +732,102 @@ const handleListAssets = (req, res, userId) => {
     }).catch((err) => {
         console.log(err);
         res.end('error');
+    });
+};
+
+const handleListPublicAssets = (req, res) => {
+    const queryObject = url.parse(req.url, true).query;
+    let { limit, offset, query, type } = queryObject;
+    if (!offset) { offset = 0; }
+    if (!limit || limit > 100) { limit = 10; }
+    listPublicAssets(query || null, limit, offset, type || null).then(({ assets, count, pageCount }) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            assets: assets.map(assetResponse),
+            count,
+            pageCount,
+        }));
+    }).catch((err) => {
+        console.error(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Failed to list assets' }));
+    });
+};
+
+const handleDeleteAsset = (req, res, userId, assetId) => {
+    Promise.all([getMongoAsset(assetId), getUserRecord(userId)]).then(([asset, userData]) => {
+        if (!asset) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Asset not found' }));
+            return;
+        }
+        if (asset.developerId !== userId && !userData.isAdmin) {
+            res.writeHead(403);
+            res.end(JSON.stringify({ error: 'Not allowed' }));
+            return;
+        }
+        deleteAsset(asset.developerId, assetId).then((result) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Asset not found' }));
+        });
+    }).catch(() => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Internal error' }));
+    });
+};
+
+const handleUpdateAssetMeta = (req, res, userId, assetId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const updates = {};
+        if (typeof body.public === 'boolean') {
+            updates.public = body.public;
+        }
+        if (body.description !== undefined) {
+            if (String(body.description).length > 80) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Description must be 80 characters or less' }));
+                return;
+            }
+            updates.description = body.description;
+        }
+
+        if (Object.keys(updates).length === 0) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'No valid fields to update' }));
+            return;
+        }
+
+        Promise.all([getMongoAsset(assetId), getUserRecord(userId)]).then(([asset, userData]) => {
+            if (!asset) {
+                res.writeHead(404);
+                res.end(JSON.stringify({ error: 'Asset not found' }));
+                return;
+            }
+            if (asset.developerId !== userId && !userData.isAdmin) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'Not allowed' }));
+                return;
+            }
+            updateAsset(asset.developerId, assetId, updates).then((result) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+            }).catch(() => {
+                res.writeHead(404);
+                res.end(JSON.stringify({ error: 'Asset not found' }));
+            });
+        }).catch(() => {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'Internal error' }));
+        });
     });
 };
 
@@ -1052,11 +1140,11 @@ const handleGetPublishedVersions = (req, res, gameId) => {
 
 module.exports = {
     setGameMaps,
-    handleDeleteGame,
+    handleDeleteGame, handleDeleteAsset,
     handlePostMap, handlePostProfile, handleVerifyDns, handleAdminAck,
     handlePostCertRequest, handleBugs, handleContact,
     handleCreateGame, handleCreateAsset, handleGamePublish, handleGameUpdate,
-    handleServices, handleSubmitPublishRequest, handleCreateBlog,
+    handleServices,
     handleSignup, handleLogin, handleRequestAction,
     handleGetMap, handleGetCertStatus, handleGetAsset,
     handleGetBlog, handleGetBlogDetail, handleGithubLink,
@@ -1067,7 +1155,8 @@ module.exports = {
     handleAdminListSupportMessages, handleAdminListPendingPublishRequests,
     handleAdminListFailedPublishRequests, handleHealth,
     handleCreateSession, handleGetPublishedVersions,
-    handleRefreshToken, handleUpdateAssetTags,
+    handleRefreshToken, handleUpdateAssetTags, handleUpdateAssetMeta,
+    handleListPublicAssets,
     handleGetGameSourceTree, handleGetGameSourceFile,
 };
 

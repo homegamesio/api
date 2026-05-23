@@ -13,6 +13,7 @@ const adminAckRegex = '/admin/acknowledge';
 const adminListPendingPublishRequestsRegex = '/admin/publish_requests';
 const adminListFailedPublishRequestsRegex = '/admin/publish_requests/failed';
 const assetsListRegex = '/assets';
+const publicAssetsCatalogRegex = '/catalog/assets';
 const verifyPublishRequestRegex = '/verify_publish_request';
 const listGamesRegex = '/games';
 const listMyGamesRegex = '/my-games';
@@ -50,6 +51,7 @@ const publishedVersionsRegex = '/games/(\\S*)/published-versions';
 const gameSourceTreeRegex = '/games/(\\S*)/source-tree';
 const gameSourceFileRegex = '/games/(\\S*)/source';
 const assetTagsRegex = '/assets/(\\S*)/tags';
+const assetMetaRegex = '/assets/(\\S*)/meta';
 
 // Studio routes
 const studioCreateGameRegex = '/studio/games';
@@ -121,7 +123,8 @@ const dispatchRequest = (req, res, requestHandlers) => {
 
 const buildRequestHandlers = (h, s) => ({
     'DELETE': {
-        [gameDetailRegex]: { requiresAuth: true, handle: h.handleDeleteGame }
+        [gameDetailRegex]: { requiresAuth: true, handle: h.handleDeleteGame },
+        [assetsRegex]: { requiresAuth: true, handle: h.handleDeleteAsset },
     },
     'POST': {
         [mapRegex]: { handle: h.handlePostMap },
@@ -133,6 +136,7 @@ const buildRequestHandlers = (h, s) => ({
         [contactRegex]: { handle: h.handleContact },
         [createGameRegex]: { requiresAuth: true, handle: h.handleCreateGame },
         [assetTagsRegex]: { requiresAuth: true, handle: h.handleUpdateAssetTags },
+        [assetMetaRegex]: { requiresAuth: true, handle: h.handleUpdateAssetMeta },
         [createAssetRegex]: { requiresAuth: true, handle: h.handleCreateAsset },
         [gamePublishRegex]: { requiresAuth: true, handle: h.handleGamePublish },
         [gameUpdateRegex]: { requiresAuth: true, handle: h.handleGameUpdate },
@@ -169,6 +173,7 @@ const buildRequestHandlers = (h, s) => ({
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },
         [gameVersionDetailRegex]: { handle: h.handleGetGameVersionDetail },
+        [publicAssetsCatalogRegex]: { handle: h.handleListPublicAssets },
         [assetsListRegex]: { requiresAuth: true, handle: h.handleListAssets },
         [devProfileRegex]: { handle: h.handleGetDevProfile },
         [profileRegex]: { requiresAuth: true, handle: h.handleGetProfile },

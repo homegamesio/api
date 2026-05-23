@@ -42,15 +42,27 @@ const mapGame = (game) => {
     };
 };
 
+const inferAssetType = (contentType) => {
+    if (!contentType) return 'other';
+    const ct = String(contentType).toLowerCase();
+    if (ct.startsWith('image/')) return 'image';
+    if (ct.startsWith('audio/')) return 'audio';
+    if (ct.startsWith('font/') || ct.includes('font')) return 'font';
+    return 'other';
+};
+
 const assetResponse = (asset) => {
+    const contentType = asset.metadata?.['Content-Type'] || null;
     return {
         id: asset.assetId,
         developerId: asset.developerId,
         name: asset.name,
         created: asset.created,
-        description: asset.description,
+        description: asset.description || '',
         size: asset.size,
-        type: asset.metadata?.['Content-Type'] || null,
+        type: contentType,
+        assetType: asset.assetType || inferAssetType(contentType),
+        public: !!asset.public,
         tags: asset.tags || [],
     };
 };
@@ -93,6 +105,7 @@ module.exports = {
     mapBlogPost,
     mapMongoGame,
     mapGame,
+    inferAssetType,
     assetResponse,
     transformS3Response,
 };

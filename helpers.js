@@ -2,8 +2,6 @@ const https = require('https');
 const fs = require('fs');
 const archiver = require('archiver');
 const acme = require('acme-client');
-const redis = require('redis');
-const geoip = require('geoip-lite');
 const { getUserHash } = require('homegames-common');
 const { Binary } = require('mongodb');
 const amqp = require('amqplib/callback_api');
@@ -68,17 +66,8 @@ const downloadZip = (url) =>
     });
   });
 
-const downloadFromGithub = (owner, repo, commit = '') =>
-  new Promise((resolve, reject) => {
-    const commitString = commit ? "/" + commit : "";
-    const thing = `https://codeload.github.com/${owner}/${repo}/zip${commitString}`;
-    downloadZip(thing).then(resolve).catch(reject);
-  });
-
 const submitPublishRequest = (userId, gameId, fields, files) => new Promise((resolve, reject) => {
     const file = files.file?.[0];
-    console.log("FIELS!");
-    console.log(files);
     if (file.size > 2 * 1000 * 1000) {
         // accept 2mb max
         reject('too big');
@@ -278,52 +267,6 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
     }
 });
 
-const updateCachedMap = (CENTROIDS) => new Promise((resolve, reject) => {
-    const redisClient = redis.createClient();
-    const finalList = [];
-    const countryMap = {};
-    redisClient.on('connect', () => {
-        redisClient.keys('*', (err, keys) => {
-            let i = 0;
-            const ting = () => {
-                if (i < keys.length) {
-                    const key = keys[i];
-                    redisClient.get(key, (err, _data) => {
-                        const data = JSON.parse(_data);
-                        if (data.country && CENTROIDS[data.country]) {
-                            if (!countryMap[data.country]) {
-                                countryMap[data.country] = {
-                                    total: 0,
-                                    centroid: CENTROIDS[data.country]
-                                };
-                            }
-                            countryMap[data.country].total = countryMap[data.country].total + 1;
-                        }
-                        i++;
-                        ting();
-                    });
-                } else {
-                    const entries = [];
-                    for (let k in countryMap) {
-                        entries.push({ centroid: countryMap[k].centroid, total: countryMap[k].total });
-                    }
-                    redisClient.end(true);
-                    resolve(entries);
-                }
-            };
-            ting();
-        });
-    });
-});
-
-const getCountryByIp = (ip) => {
-    const geo = geoip.lookup(ip);
-    if (geo && geo.country) {
-        return geo.country;
-    }
-    return null;
-};
-
 const generateSocketId = () => {
     const { v4: uuidv4 } = require('uuid');
     return uuidv4();
@@ -456,18 +399,14 @@ module.exports = {
     getReqBody,
     getPublicIp,
     downloadZip,
-    downloadFromGithub,
     submitPublishRequest,
     getDnsRecord,
     deleteDnsRecord,
     createDnsRecord,
     zipCert,
     handleCertRequest,
-    updateCachedMap,
-    getCountryByIp,
     generateSocketId,
     logSuccess,
     logFailure,
-    getPodcastData,
     validateServiceRequest,
 };

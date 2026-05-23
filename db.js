@@ -203,6 +203,53 @@ const updateGame = (gameId, updateParams) => new Promise((resolve, reject) => {
     }
 });
 
+const { inferAssetType } = require('./models');
+
+const assetTypeFilter = (assetType) => {
+    if (!assetType || !['image', 'audio', 'font'].includes(assetType)) {
+        return null;
+    }
+    const contentTypePatterns = {
+        image: '^image/',
+        audio: '^audio/',
+        font: 'font',
+    };
+    return {
+        '$or': [
+            { assetType },
+            { 'metadata.Content-Type': { '$regex': contentTypePatterns[assetType], $options: 'i' } },
+        ],
+    };
+};
+
+const listPublicAssets = (query, limit = 10, offset = 0, assetType = null) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(collection => {
+        const filters = [{ public: true }];
+        const typeFilter = assetTypeFilter(assetType);
+        if (typeFilter) {
+            filters.push(typeFilter);
+        }
+        if (query) {
+            filters.push({
+                '$or': [
+                    { name: { '$regex': query, $options: 'i' } },
+                    { description: { '$regex': query, $options: 'i' } },
+                    { developerId: { '$regex': query, $options: 'i' } },
+                    { tags: { '$regex': query, $options: 'i' } },
+                ],
+            });
+        }
+        const dbQuery = filters.length === 1 ? filters[0] : { '$and': filters };
+
+        collection.countDocuments(dbQuery).then((total) => {
+            const pageCount = Math.max(1, Math.ceil(total / limit));
+            collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
+                resolve({ assets, count: total, pageCount });
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
 const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(collection => {
         let dbQuery = { developerId };
@@ -237,14 +284,76 @@ const getAssetCount = (developerId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
-const createAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
-   createMongoAssetRecord(developerId, assetId, size, name, metadata, description).then(resolve).catch(reject);
+const createAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false) => new Promise((resolve, reject) => {
+   createMongoAssetRecord(developerId, assetId, size, name, metadata, description, isPublic).then(resolve).catch(reject);
 });
 
-const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description) => new Promise((resolve, reject) => {
+const normalizeAssetDescription = (description) => {
+    if (!description) return '';
+    return String(description).trim().substring(0, 80);
+};
+
+const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(assetCollection => {
-        assetCollection.insertOne({ created: Date.now(), developerId, assetId, size, name, metadata, description, tags: [] }).then(() => resolve({assetId})).catch(reject);
+        const contentType = metadata && metadata['Content-Type'];
+        assetCollection.insertOne({
+            created: Date.now(),
+            developerId,
+            assetId,
+            size,
+            name,
+            metadata,
+            description: normalizeAssetDescription(description),
+            tags: [],
+            public: !!isPublic,
+            assetType: inferAssetType(contentType),
+        }).then(() => resolve({ assetId })).catch(reject);
     });
+});
+
+const updateAsset = (developerId, assetId, updates) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(collection => {
+        collection.findOne({ assetId, developerId }).then(asset => {
+            if (!asset) {
+                reject('Asset not found');
+                return;
+            }
+            const setFields = {};
+            if (typeof updates.public === 'boolean') {
+                setFields.public = updates.public;
+            }
+            if (updates.description !== undefined) {
+                setFields.description = normalizeAssetDescription(updates.description);
+            }
+            if (Object.keys(setFields).length === 0) {
+                resolve({ assetId });
+                return;
+            }
+            collection.updateOne({ assetId, developerId }, { '$set': setFields }).then(() => {
+                resolve({ assetId, ...setFields });
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
+const deleteAsset = (developerId, assetId) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(collection => {
+        collection.findOne({ assetId, developerId }).then(asset => {
+            if (!asset) {
+                reject('Asset not found');
+                return;
+            }
+            Promise.all([
+                collection.deleteOne({ assetId, developerId }),
+                getMongoCollection('documents').then(documentCollection => {
+                    documentCollection.deleteOne({ assetId });
+                }),
+                getMongoCollection('games').then(gamesCollection => {
+                    gamesCollection.updateMany({ thumbnail: assetId }, { '$unset': { thumbnail: '' } });
+                }),
+            ]).then(() => resolve({ assetId })).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
 });
 
 const updateAssetTags = (developerId, assetId, tags) => new Promise((resolve, reject) => {
@@ -527,17 +636,19 @@ const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
 
 const deleteGame = (gameId, searchDeleteFn) => new Promise((resolve, reject) => {
     const afterSearchDelete = () => {
-        getMongoCollection('games').then(gameCollection => {
-            gameCollection.deleteOne({ gameId }).then(() => {
-                getMongoCollection('gameVersions').then(gameVersions => {
-                    gameVersions.deleteMany({ gameId }).then(() => {
-                        getMongoCollection('publishRequests').then(publishRequests => {
-                            publishRequests.deleteMany({ gameId }).then(() => {
-                                resolve();
-                            }).catch(resolve);
-                        }).catch(resolve);
-                    }).catch(resolve);
-                }).catch(resolve);
+        const deleteManyByGameId = (collectionName) => new Promise((res, rej) => {
+            getMongoCollection(collectionName).then(collection => {
+                collection.deleteMany({ gameId }).then(() => res()).catch(rej);
+            }).catch(rej);
+        });
+
+        Promise.all([
+            deleteManyByGameId('builds'),
+            deleteManyByGameId('gameVersions'),
+            deleteManyByGameId('publishRequests'),
+        ]).then(() => {
+            getMongoCollection('games').then(gameCollection => {
+                gameCollection.deleteOne({ gameId }).then(() => resolve()).catch(reject);
             }).catch(reject);
         }).catch(reject);
     };
@@ -565,10 +676,13 @@ module.exports = {
     getGame,
     updateGame,
     listAssets,
+    listPublicAssets,
     getAssetCount,
     MAX_ASSETS_PER_USER,
     createAssetRecord,
     createMongoAssetRecord,
+    updateAsset,
+    deleteAsset,
     updateAssetTags,
     adminListPendingPublishRequests,
     adminAcknowledgeMessage,
