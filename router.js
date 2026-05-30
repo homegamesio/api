@@ -70,6 +70,7 @@ const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
 const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
+const deleteDeveloperRegex = '/admin/developers/(\\S*)';
 
 const dispatchRequest = (req, res, requestHandlers) => {
     if (req.method === 'OPTIONS') {
@@ -123,6 +124,7 @@ const dispatchRequest = (req, res, requestHandlers) => {
 
 const buildRequestHandlers = (h, s) => ({
     'DELETE': {
+        [deleteDeveloperRegex]: { requiresAuth: true, handle: h.handleDeleteDeveloper },
         [gameDetailRegex]: { requiresAuth: true, handle: h.handleDeleteGame },
         [assetsRegex]: { requiresAuth: true, handle: h.handleDeleteAsset },
     },

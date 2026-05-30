@@ -670,6 +670,37 @@ const deleteGame = (gameId, searchDeleteFn) => new Promise((resolve, reject) => 
     }
 });
 
+const deleteDeveloper = (userId) => new Promise((resolve, reject) => {
+    const deleteByUser = (collectionName, field) => new Promise((res, rej) => {
+        getMongoCollection(collectionName).then(collection => {
+            collection.deleteMany({ [field]: userId }).then(() => res()).catch(rej);
+        }).catch(rej);
+    });
+
+    // Find all games by this developer so we can clean up related collections
+    getMongoCollection('games').then(gamesCollection => {
+        gamesCollection.find({ developerId: userId }).toArray().then(games => {
+            const gameIds = games.map(g => g.gameId);
+
+            const gameCleanups = gameIds.length > 0 ? [
+                getMongoCollection('gameVersions').then(c => c.deleteMany({ gameId: { $in: gameIds } })),
+                getMongoCollection('publishRequests').then(c => c.deleteMany({ gameId: { $in: gameIds } })),
+                getMongoCollection('builds').then(c => c.deleteMany({ gameId: { $in: gameIds } })),
+            ] : [];
+
+            Promise.all([
+                ...gameCleanups,
+                deleteByUser('games', 'developerId'),
+                deleteByUser('assets', 'developerId'),
+                deleteByUser('documents', 'developerId'),
+                deleteByUser('users', 'userId'),
+            ]).then(() => {
+                resolve({ userId, gamesDeleted: gameIds.length });
+            }).catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
 module.exports = {
     getMongoClient,
     getMongoCollection,
@@ -712,4 +743,5 @@ module.exports = {
     getCertRecord,
     getCertStatus,
     deleteGame,
+    deleteDeveloper,
 };

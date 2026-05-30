@@ -57,6 +57,7 @@ const {
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
     updateAssetTags, listPublicAssets, updateAsset, deleteAsset,
+    deleteDeveloper,
 } = require('./db');
 const { listGames, listPublicGamesForAuthor, deleteGame: searchDeleteGame } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
@@ -104,6 +105,50 @@ const updateProfileInfo = (userId, { description, image, btcAddress }) => {
 };
 
 // DELETE handlers
+
+const handleDeleteDeveloper = (req, res, userId, devId) => {
+    getUserRecord(userId).then(userData => {
+        if (!userData.isAdmin) {
+            console.warn(`user ${userId} tried to delete developer ${devId}`);
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not an admin' }));
+            return;
+        }
+
+        // Clean up Forgejo repos for all the developer's games
+        getMongoCollection('games').then(gamesCollection => {
+            gamesCollection.find({ developerId: devId }).toArray().then(games => {
+                const { deleteRepo } = require('./forgejo');
+                const forgejoCleanups = games
+                    .filter(g => g.forgejoRepo)
+                    .map(g => {
+                        const [owner, repo] = g.forgejoRepo.split('/');
+                        return deleteRepo(owner, repo).catch(err => {
+                            console.warn(`Forgejo delete failed for ${g.forgejoRepo}`, err);
+                        });
+                    });
+
+                // Also remove games from search index
+                const searchCleanups = games.map(g => searchDeleteGame(g.gameId).catch(() => {}));
+
+                Promise.all([...forgejoCleanups, ...searchCleanups]).then(() => {
+                    deleteDeveloper(devId).then(result => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ deleted: true, userId: devId, gamesDeleted: result.gamesDeleted }));
+                    }).catch(err => {
+                        console.error(`Failed to delete developer ${devId}`, err);
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Delete failed' }));
+                    });
+                });
+            });
+        }).catch(err => {
+            console.error('Failed to look up developer games', err);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Delete failed' }));
+        });
+    });
+};
 
 const handleDeleteGame = (req, res, userId, gameId) => {
     getUserRecord(userId).then(userData => {
@@ -1184,7 +1229,7 @@ const handleGetPublishedVersions = (req, res, gameId) => {
 
 module.exports = {
     setGameMaps,
-    handleDeleteGame, handleDeleteAsset,
+    handleDeleteGame, handleDeleteAsset, handleDeleteDeveloper,
     handlePostMap, handlePostProfile, handleVerifyDns, handleAdminAck,
     handlePostCertRequest, handleBugs, handleContact,
     handleCreateGame, handleCreateAsset, handleGamePublish, handleGameUpdate,

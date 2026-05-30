@@ -1228,8 +1228,36 @@ const handleSubmitPublishRequest = (req, res, userId, gameId) => {
                 return;
             }
 
-            // Check for existing pending/processing request for same game+commit
+            if (!game.description || !game.description.trim()) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game must have a description before publishing' }));
+                return;
+            }
+
+            if (!game.thumbnail) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game must have a thumbnail set before publishing' }));
+                return;
+            }
+
             getMongoCollection('publishRequests').then(collection => {
+                // Rate limit: 1 publish request per 10 minutes per user
+                const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+                collection.findOne(
+                    { userId, created: { $gt: tenMinutesAgo } },
+                    { sort: { created: -1 } }
+                ).then(recent => {
+                    if (recent) {
+                        const waitSecs = Math.ceil((recent.created + 10 * 60 * 1000 - Date.now()) / 1000);
+                        const waitMins = Math.ceil(waitSecs / 60);
+                        res.writeHead(429, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            error: `Publish limit: 1 request per 10 minutes. Try again in ${waitMins} minute${waitMins === 1 ? '' : 's'}.`,
+                        }));
+                        return;
+                    }
+
+                // Check for existing pending/processing request for same game+commit
                 collection.findOne({
                     gameId,
                     commitSha,
@@ -1304,6 +1332,7 @@ const handleSubmitPublishRequest = (req, res, userId, gameId) => {
                         res.end(JSON.stringify({ error: 'Failed to create publish request' }));
                     });
                 });
+                }); // end rate limit check
             }).catch(err => {
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: 'Database error' }));
