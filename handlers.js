@@ -152,14 +152,13 @@ const handleDeleteDeveloper = (req, res, userId, devId) => {
 
 const handleDeleteGame = (req, res, userId, gameId) => {
     getUserRecord(userId).then(userData => {
-        if (!userData.isAdmin) {
-            console.warn(`user ${userId} tried to delete game ${gameId}`);
-            res.statusCode = 403;
-            res.end(JSON.stringify({ error: 'Not an admin' }));
-            return;
-        }
-
         getGame(gameId).then((game) => {
+            if (!userData.isAdmin && game.developerId !== userId) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not authorized to delete this game' }));
+                return;
+            }
+
             deleteGame(gameId, searchDeleteGame).then(() => {
                 const forgejoCleanup = game.forgejoRepo
                     ? (() => {
@@ -470,6 +469,17 @@ const handleGameUpdate = (req, res, userId, gameId) => {
                     res.writeHead(400, { 'Content-Type': 'text/plain' });
                     res.end('You cannot modify a game that you didnt create');
                 } else {
+                    if (data.description !== undefined && !data.description.trim() && game.description && game.description.trim()) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Cannot remove description once set' }));
+                        return;
+                    }
+                    if (data.thumbnail !== undefined && !data.thumbnail && game.thumbnail) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Cannot remove thumbnail once set' }));
+                        return;
+                    }
+
                     if (data.description != game.description) {
                         updateGame(gameId, {description: data.description}).then((_game) => {
                             res.end(JSON.stringify(_game));
