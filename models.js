@@ -64,6 +64,7 @@ const assetResponse = (asset) => {
         assetType: asset.assetType || inferAssetType(contentType),
         public: !!asset.public,
         tags: asset.tags || [],
+        nsfw: !!asset.nsfw,
     };
 };
 

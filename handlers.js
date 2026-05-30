@@ -61,6 +61,8 @@ const {
 const { listGames, listPublicGamesForAuthor, deleteGame: searchDeleteGame } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
 const { login, signup } = require('./auth');
+const { detectMime } = require('./detect');
+const { classifyImage } = require('./nsfw');
 const {
     getReqBody, downloadFromGithub, submitPublishRequest, getDnsRecord,
     zipCert, handleCertRequest, getPodcastData, validateServiceRequest,
@@ -258,44 +260,46 @@ const handleCreateGame = (req, res, userId) => {
                 res.end('creation requires name & description');
             } else {
                 const gameId = generateId();
-
-                console.log("FIFIFIFI");
-                console.log(files);
                 const fileValues = Object.values(files);
+                const f = fileValues[0][0];
 
-                let hack = false;
+                if (f.size > MAX_SIZE) {
+                    res.writeHead(400);
+                    res.end('File size exceeds ' + MAX_SIZE + ' bytes');
+                    return;
+                }
 
-                const uploadedFiles = fileValues[0].map(f => {
-                    if (hack) {
+                (async () => {
+                    const buffer = fs.readFileSync(f.path);
+                    const detectedMime = detectMime(buffer);
+                    if (!detectedMime) {
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: 'Unsupported file type' }));
                         return;
                     }
-                    hack = true;
 
-                    if (f.size > MAX_SIZE) {
-                        res.writeHead(400);
-                        res.end('File size exceeds ' + MAX_SIZE + ' bytes');
-                    } else {
-                        const assetId = generateId();
-                        const description = fields?.description?.[0] || '';
-                        createAssetRecord(userId, assetId, f.size, f.originalFilename, {
-                            'Content-Type': f.headers['content-type']
-                        }, `thumbnail for game ${gameId}`).then((asset) => {
-                            getMongoCollection('documents').then(documentCollection => {
-                                documentCollection.insertOne({ developerId: userId, assetId, data: new Binary(fs.readFileSync(f.path)), fileSize: f.size, fileType: f.headers['content-type'] }).then(() => {
-                                    console.log('dsfjkdsfkjhdsfkjhds');
-                                    console.log(asset);
-                                    createGame(userId, asset.assetId, fields, files).then(game => {
-                                        console.log('created game');
-                                        console.log(game);
-                                        res.writeHead(200, {
-                                            'Content-Type': 'application/json'
-                                        });
-                                        res.end(JSON.stringify(game));
-                                    });
-                                });
-                            });
-                        });
+                    let nsfwResult = null;
+                    if (detectedMime.startsWith('image/')) {
+                        try {
+                            nsfwResult = await classifyImage(buffer);
+                        } catch (err) {
+                            console.error('NSFW classification failed:', err);
+                        }
                     }
+
+                    const assetId = generateId();
+                    const asset = await createAssetRecord(userId, assetId, f.size, f.originalFilename, {
+                        'Content-Type': detectedMime
+                    }, `thumbnail for game ${gameId}`, false, nsfwResult);
+                    const documentCollection = await getMongoCollection('documents');
+                    await documentCollection.insertOne({ developerId: userId, assetId, data: new Binary(buffer), fileSize: f.size, fileType: detectedMime });
+                    const game = await createGame(userId, asset.assetId, fields, files);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(game));
+                })().catch(err => {
+                    console.error('Game creation error:', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Game creation failed' }));
                 });
             }
         }
@@ -322,32 +326,45 @@ const handleCreateAsset = (req, res, userId) => {
                 res.end('no');
             } else {
                 const fileValues = Object.values(files);
-                let hack = false;
+                const f = fileValues[0][0];
 
-                const uploadedFiles = fileValues[0].map(f => {
-                    if (hack) {
+                if (f.size > MAX_SIZE) {
+                    res.writeHead(400);
+                    res.end('File size exceeds ' + MAX_SIZE + ' bytes');
+                    return;
+                }
+
+                (async () => {
+                    const buffer = fs.readFileSync(f.path);
+                    const detectedMime = detectMime(buffer);
+                    if (!detectedMime) {
+                        res.writeHead(400);
+                        res.end(JSON.stringify({ error: 'Unsupported file type' }));
                         return;
                     }
-                    hack = true;
 
-                    if (f.size > MAX_SIZE) {
-                        res.writeHead(400);
-                        res.end('File size exceeds ' + MAX_SIZE + ' bytes');
-                    } else {
-                        const assetId = getHash(uuidv4());
-                        const description = (fields?.description?.[0] || '').trim().substring(0, 80);
-                        const isPublic = fields?.public?.[0] === 'true' || fields?.public?.[0] === true;
-                        createAssetRecord(userId, assetId, f.size, f.originalFilename, {
-                            'Content-Type': f.headers['content-type']
-                        }, description, isPublic).then(() => {
-                            uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, f.headers['content-type']).then((assetId) => {
-                                res.writeHead(200, {
-                                    'Content-Type': 'application/json'
-                                });
-                                res.end(JSON.stringify({ assetId }));
-                            });
-                        });
+                    let nsfwResult = null;
+                    if (detectedMime.startsWith('image/')) {
+                        try {
+                            nsfwResult = await classifyImage(buffer);
+                        } catch (err) {
+                            console.error('NSFW classification failed:', err);
+                        }
                     }
+
+                    const assetId = getHash(uuidv4());
+                    const description = (fields?.description?.[0] || '').trim().substring(0, 80);
+                    const isPublic = fields?.public?.[0] === 'true' || fields?.public?.[0] === true;
+                    await createAssetRecord(userId, assetId, f.size, f.originalFilename, {
+                        'Content-Type': detectedMime
+                    }, description, isPublic, nsfwResult);
+                    await uploadMongo(userId, assetId, f.path, f.originalFilename, f.size, detectedMime);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ assetId }));
+                })().catch(err => {
+                    console.error('Asset upload error:', err);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Upload failed' }));
                 });
             }
         });
@@ -738,10 +755,10 @@ const handleListAssets = (req, res, userId) => {
 
 const handleListPublicAssets = (req, res) => {
     const queryObject = url.parse(req.url, true).query;
-    let { limit, offset, query, type } = queryObject;
+    let { limit, offset, query, type, includeNsfw } = queryObject;
     if (!offset) { offset = 0; }
     if (!limit || limit > 100) { limit = 10; }
-    listPublicAssets(query || null, limit, offset, type || null).then(({ assets, count, pageCount }) => {
+    listPublicAssets(query || null, limit, offset, type || null, includeNsfw === 'true').then(({ assets, count, pageCount }) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             assets: assets.map(assetResponse),

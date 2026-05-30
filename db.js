@@ -227,9 +227,12 @@ const assetTypeFilter = (assetType) => {
     };
 };
 
-const listPublicAssets = (query, limit = 10, offset = 0, assetType = null) => new Promise((resolve, reject) => {
+const listPublicAssets = (query, limit = 10, offset = 0, assetType = null, includeNsfw = false) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(collection => {
         const filters = [{ public: true }];
+        if (!includeNsfw) {
+            filters.push({ nsfw: { $ne: true } });
+        }
         const typeFilter = assetTypeFilter(assetType);
         if (typeFilter) {
             filters.push(typeFilter);
@@ -289,8 +292,8 @@ const getAssetCount = (developerId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
-const createAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false) => new Promise((resolve, reject) => {
-   createMongoAssetRecord(developerId, assetId, size, name, metadata, description, isPublic).then(resolve).catch(reject);
+const createAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false, nsfwResult = null) => new Promise((resolve, reject) => {
+   createMongoAssetRecord(developerId, assetId, size, name, metadata, description, isPublic, nsfwResult).then(resolve).catch(reject);
 });
 
 const normalizeAssetDescription = (description) => {
@@ -298,7 +301,7 @@ const normalizeAssetDescription = (description) => {
     return String(description).trim().substring(0, 80);
 };
 
-const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false) => new Promise((resolve, reject) => {
+const createMongoAssetRecord = (developerId, assetId, size, name, metadata, description, isPublic = false, nsfwResult = null) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(assetCollection => {
         const contentType = metadata && metadata['Content-Type'];
         assetCollection.insertOne({
@@ -312,6 +315,8 @@ const createMongoAssetRecord = (developerId, assetId, size, name, metadata, desc
             tags: [],
             public: !!isPublic,
             assetType: inferAssetType(contentType),
+            nsfw: nsfwResult ? nsfwResult.nsfw : false,
+            nsfwScore: nsfwResult ? nsfwResult.nsfwScore : 0,
         }).then(() => resolve({ assetId })).catch(reject);
     });
 });
