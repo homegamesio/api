@@ -11,7 +11,7 @@ const { getMongoCollection } = require('./db');
 // List games (public catalog)
 // ---------------------------------------------------------------------------
 
-const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = null) => new Promise((resolve, reject) => {
+const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = null, includeNsfw = false) => new Promise((resolve, reject) => {
     // First find all gameIds that have at least one published version
     getMongoCollection('gameVersions').then(versionCollection => {
         versionCollection.distinct('gameId', { published: true }).then(publishedGameIds => {
@@ -22,6 +22,10 @@ const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = 
 
             getMongoCollection('games').then(gameCollection => {
                 let dbQuery = { gameId: { $in: publishedGameIds } };
+
+                if (!includeNsfw) {
+                    dbQuery.nsfw = { $ne: true };
+                }
 
                 if (featured) {
                     dbQuery.featured = true;
@@ -63,7 +67,7 @@ const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = 
 // ---------------------------------------------------------------------------
 
 const listPublicGamesForAuthor = (params) => new Promise((resolve, reject) => {
-    const { author, offset = 0, limit = 10 } = params;
+    const { author, offset = 0, limit = 10, includeNsfw = false } = params;
 
     getMongoCollection('gameVersions').then(versionCollection => {
         versionCollection.distinct('gameId', { published: true }).then(publishedGameIds => {
@@ -77,6 +81,10 @@ const listPublicGamesForAuthor = (params) => new Promise((resolve, reject) => {
                     gameId: { $in: publishedGameIds },
                     developerId: author,
                 };
+
+                if (!includeNsfw) {
+                    dbQuery.nsfw = { $ne: true };
+                }
 
                 gameCollection.countDocuments(dbQuery).then(total => {
                     const pageCount = Math.ceil(total / limit);
@@ -121,6 +129,7 @@ const mapGame = (game) => ({
     created: game.created,
     thumbnail: game.thumbnail,
     featured: game.featured || false,
+    nsfw: !!game.nsfw,
 });
 
 module.exports = {

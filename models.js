@@ -27,7 +27,8 @@ const mapMongoGame = (game) => {
         name: game.name || '',
         developerId: game.developerId,
         created: game.created,
-        thumbnail: game.thumbnail
+        thumbnail: game.thumbnail,
+        nsfw: !!game.nsfw,
     };
 };
 

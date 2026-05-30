@@ -279,7 +279,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
             return { success: false, error: 'Docker validation is required but not available' };
         }
 
-        return { success: true };
+        return { success: true, assetIds: validationResult.assetIds || [] };
     } finally {
         // Clean up extracted files
         if (extractedPath) {
@@ -314,6 +314,28 @@ const handlePublishRequest = async (message) => {
         const result = await validatePublishRequest(gameId, commitSha);
 
         if (result.success) {
+            // Check NSFW status of in-game assets + thumbnail
+            let isNsfw = false;
+            try {
+                const games = await getCollection('games');
+                const game = await games.findOne({ gameId });
+                const allAssetIds = [...(result.assetIds || [])];
+                if (game && game.thumbnail && !allAssetIds.includes(game.thumbnail)) {
+                    allAssetIds.push(game.thumbnail);
+                }
+                if (allAssetIds.length > 0) {
+                    const assets = await getCollection('assets');
+                    const nsfwCount = await assets.countDocuments({
+                        assetId: { $in: allAssetIds },
+                        nsfw: true,
+                    });
+                    isNsfw = nsfwCount > 0;
+                }
+                console.log(`[worker] NSFW check: ${allAssetIds.length} assets, nsfw=${isNsfw}`);
+            } catch (nsfwErr) {
+                console.error('[worker] NSFW check failed (defaulting to false):', nsfwErr.message);
+            }
+
             const gameVersions = await getCollection('gameVersions');
             const versionId = generateId();
 
@@ -324,13 +346,18 @@ const handlePublishRequest = async (message) => {
                 publishedAt: Date.now(),
                 publishedBy: userId,
                 published: true,
+                nsfw: isNsfw,
             });
+
+            // Update game record to reflect latest version's NSFW status
+            const gamesCollection = await getCollection('games');
+            await gamesCollection.updateOne({ gameId }, { $set: { nsfw: isNsfw } });
 
             await publishRequests.updateOne({ requestId }, {
                 $set: { status: 'PUBLISHED', versionId, completedAt: Date.now() }
             });
 
-            console.log(`[worker] ✓ Published version ${versionId} for game ${gameId}`);
+            console.log(`[worker] ✓ Published version ${versionId} for game ${gameId} (nsfw=${isNsfw})`);
         } else {
             await publishRequests.updateOne({ requestId }, {
                 $set: { status: 'FAILED', error: result.error, completedAt: Date.now() }

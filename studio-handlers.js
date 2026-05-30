@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { API_PUBLIC_URL, FORGEJO_USER_SECRET, FORGEJO_WEBHOOK_SECRET } = require('./config');
 const { generateId } = require('./crypto');
 const {
-    getUserRecord, getGame, getGameDetails, getMongoCollection,
+    getUserRecord, getGame, getGameDetails, getMongoCollection, getMongoAsset,
 } = require('./db');
 
 const {
@@ -1395,12 +1395,33 @@ function handleSetGameThumbnail(req, res, userId, gameId) {
             }
 
             getMongoCollection('games').then(collection => {
-                collection.updateOne({ gameId }, { $set: { thumbnail: assetId } }).then(() => {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ gameId, thumbnail: assetId }));
-                }).catch(err => {
-                    res.writeHead(500);
-                    res.end(JSON.stringify({ error: 'Failed to update thumbnail' }));
+                const updates = { thumbnail: assetId };
+
+                getMongoAsset(assetId).then(asset => {
+                    if (asset && asset.nsfw) {
+                        updates.nsfw = true;
+                    } else {
+                        // Thumbnail is clean — check if latest published version is NSFW
+                        return getMongoCollection('gameVersions').then(versionCollection => {
+                            return versionCollection.find({ gameId, published: true })
+                                .sort({ publishedAt: -1 })
+                                .limit(1)
+                                .toArray()
+                                .then(versions => {
+                                    updates.nsfw = versions.length > 0 && !!versions[0].nsfw;
+                                });
+                        });
+                    }
+                }).catch(() => {
+                    // Asset lookup failed — don't change nsfw status
+                }).then(() => {
+                    collection.updateOne({ gameId }, { $set: updates }).then(() => {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ gameId, thumbnail: assetId }));
+                    }).catch(err => {
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ error: 'Failed to update thumbnail' }));
+                    });
                 });
             });
         }).catch(err => {

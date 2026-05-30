@@ -439,7 +439,21 @@ const handleGameUpdate = (req, res, userId, gameId) => {
                 }
 
                 if (data.thumbnail !== game.thumbnail) {
-                    createGameImagePublishRequest(userId, data.thumbnail, gameId);
+                    getMongoAsset(data.thumbnail).then(asset => {
+                        if (asset && asset.nsfw) {
+                            getMongoCollection('games').then(c => c.updateOne({ gameId }, { $set: { nsfw: true } }));
+                        } else {
+                            // Thumbnail is clean — fall back to latest version's nsfw flag
+                            getMongoCollection('gameVersions').then(c => {
+                                c.find({ gameId, published: true }).sort({ publishedAt: -1 }).limit(1).toArray().then(versions => {
+                                    const versionNsfw = versions.length > 0 && !!versions[0].nsfw;
+                                    getMongoCollection('games').then(gc => gc.updateOne({ gameId }, { $set: { nsfw: versionNsfw } }));
+                                });
+                            });
+                        }
+                    }).catch(err => {
+                        console.error('NSFW check on thumbnail update failed:', err);
+                    });
                 }
             }).catch(err => {
                 res.end(err.toString());
@@ -684,11 +698,12 @@ const handleListMyGames = (req, res, userId) => {
 
 const handleListGames = (req, res) => {
     const queryObject = url.parse(req.url, true).query;
-    let { query, author, offset, limit, featured } = queryObject;
+    let { query, author, offset, limit, featured, includeNsfw } = queryObject;
     if (!offset) { offset = 0; }
     if (!limit) { limit = 10; }
+    const nsfw = includeNsfw === 'true';
     if (author) {
-        listPublicGamesForAuthor({ author, offset, limit }).then((data) => {
+        listPublicGamesForAuthor({ author, offset, limit, includeNsfw: nsfw }).then((data) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(data));
         }).catch(err => {
@@ -697,7 +712,7 @@ const handleListGames = (req, res) => {
             res.end('error');
         });
     } else {
-        listGames(limit, offset, null, query, featured === 'true' ? true : null).then(results => {
+        listGames(limit, offset, null, query, featured === 'true' ? true : null, nsfw).then(results => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(results));
         }).catch(err => {
