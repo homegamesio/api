@@ -1,5 +1,6 @@
 const tf = require('@tensorflow/tfjs-node');
 const nsfw = require('nsfwjs');
+const sharp = require('sharp');
 
 let model = null;
 
@@ -19,7 +20,9 @@ loadModel().then(() => {
 
 const classifyImage = async (buffer) => {
     const m = await loadModel();
-    const image = tf.node.decodeImage(buffer, 3);
+    // Convert any supported image format to raw PNG for tfjs compatibility
+    const pngBuffer = await sharp(buffer).png().toBuffer();
+    const image = tf.node.decodeImage(pngBuffer, 3);
     try {
         const predictions = await m.classify(image);
         const nsfwScore = predictions
