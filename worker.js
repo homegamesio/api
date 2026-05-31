@@ -256,6 +256,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
         }
 
         // Run Docker validation if available
+        let validationResult = null;
         if (validateGame) {
             console.log(`[worker] Running Docker validation for ${owner}/${repo}`);
 
@@ -264,7 +265,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
             const squishMatch = indexContent.match(/squishVersion\s*:\s*['"](\w+)['"]/);
             if (squishMatch) squishVersion = squishMatch[1];
 
-            const validationResult = await validateGame({
+            validationResult = await validateGame({
                 codePath: extractedPath,
                 squishVersion,
                 timeoutMs: 30000,
