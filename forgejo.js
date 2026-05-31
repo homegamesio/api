@@ -1,5 +1,21 @@
 const http = require('http');
-const { FORGEJO_URL, FORGEJO_ADMIN_TOKEN } = require('./config');
+const fs = require('fs');
+const { FORGEJO_URL } = require('./config');
+
+const CREDENTIALS_DIR = process.env.CREDENTIALS_DIRECTORY;
+if (!CREDENTIALS_DIR) {
+    throw new Error('CREDENTIALS_DIRECTORY environment variable is not set');
+}
+
+const FORGEJO_ADMIN_TOKEN = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-admin-token`, 'utf-8').trim();
+if (!FORGEJO_ADMIN_TOKEN) {
+    throw new Error('forgejo-admin-token credential file is empty');
+}
+
+const FORGEJO_USER_SECRET = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-user-secret`, 'utf-8').trim();
+if (!FORGEJO_USER_SECRET) {
+    throw new Error('forgejo-user-secret credential file is empty');
+}
 
 // Parse FORGEJO_URL into host/port for http.request
 const parseForgejoUrl = () => {
@@ -228,4 +244,5 @@ module.exports = {
     listCommits,
     getRepoInfo,
     downloadArchive,
+    FORGEJO_USER_SECRET,
 };

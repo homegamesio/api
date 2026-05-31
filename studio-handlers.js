@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
-const { API_PUBLIC_URL, FORGEJO_USER_SECRET, FORGEJO_WEBHOOK_SECRET } = require('./config');
+const { API_PUBLIC_URL, FORGEJO_WEBHOOK_SECRET } = require('./config');
 const { generateId } = require('./crypto');
 const {
     getUserRecord, getGame, getGameDetails, getMongoCollection, getMongoAsset,
@@ -12,6 +12,7 @@ const {
     createRepo, createWebhook, getFileTree, getFileContents,
     createOrUpdateFile, deleteFile, listCommits, getRepoInfo,
     createForgejoUser, adminEditUser,
+    FORGEJO_USER_SECRET,
 } = require('./forgejo');
 const { getReqBody } = require('./helpers');
 
@@ -30,10 +31,7 @@ const deriveForgejoPassword = (userId) => {
 // ---------------------------------------------------------------------------
 
 const ensureForgejoUser = (userId) => new Promise((resolve, reject) => {
-    console.log('baababab');
     getUserRecord(userId).then(user => {
-        console.log('user recordcd');
-        console.log(user);
         if (user.forgejoAccountCreated) {
             resolve();
             return;
@@ -42,7 +40,6 @@ const ensureForgejoUser = (userId) => new Promise((resolve, reject) => {
         console.log(`Provisioning Forgejo account for user: ${userId}`);
         const forgejoEmail = `${userId}@homegames.local`;
         const forgejoPass = deriveForgejoPassword(userId);
-        console.log('forgejopass ' + forgejoPass);
 
         const markCreated = () => {
             getMongoCollection('users').then(users => {
@@ -55,7 +52,6 @@ const ensureForgejoUser = (userId) => new Promise((resolve, reject) => {
         createForgejoUser(userId, forgejoEmail, forgejoPass)
             .then(() => markCreated())
             .catch(err => {
-                console.log('erortiritrt');
                 console.log(err);
                 if (err && err.status === 422) {
                     console.log(`Forgejo user ${userId} already exists`);
@@ -514,7 +510,6 @@ const handleStudioCreateGame = (req, res, userId) => {
                 res.end(JSON.stringify({ error: 'Failed to create repository' }));
             });
         }).catch(err => {
-            console.log('sdnfsdlfsd');
             console.error('Failed to ensure Forgejo account', err);
             res.writeHead(500);
             res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to set up development account' }));

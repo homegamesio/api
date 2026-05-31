@@ -34,9 +34,7 @@ if (!JWT_SECRET) {
 const AUTH_TYPE = process.env.AUTH_TYPE || 'mongo';
 
 const FORGEJO_URL = 'http://52.32.110.71:3000';//process.env.FORGEJO_URL || 'http://localhost:3000';
-const FORGEJO_ADMIN_TOKEN = process.env.FORGEJO_ADMIN_TOKEN || '';
 const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
-const FORGEJO_USER_SECRET = process.env.FORGEJO_USER_SECRET || 'change-me-forgejo-user-secret';
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
 const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
@@ -64,9 +62,7 @@ module.exports = {
     AUTH_TYPE,
     MAX_SIZE,
     FORGEJO_URL,
-    FORGEJO_ADMIN_TOKEN,
     FORGEJO_WEBHOOK_SECRET,
-    FORGEJO_USER_SECRET,
     API_PUBLIC_URL,
     HOMENAMES_URL,
 };
