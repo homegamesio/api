@@ -4,6 +4,15 @@ const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
 const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 
+// Dedicated queue for LLM "modify my game" requests. Consumed by the
+// self-hosted MLX worker. Kept separate so that worker's broker credentials
+// can be scoped to just this queue.
+const LLM_QUEUE_NAME = process.env.LLM_QUEUE_NAME || 'llm_requests';
+
+// Shared secret the self-hosted MLX worker uses to post results back to the
+// API. NOT a user JWT — this authenticates the worker, not a person.
+const LLM_WORKER_SECRET = process.env.LLM_WORKER_SECRET || '';
+
 const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
 const DB_TYPE = process.env.DB_TYPE || 'local';
@@ -44,6 +53,8 @@ const MAX_SIZE = 6 * 1024 * 1024;
 module.exports = {
     CERT_DOMAIN,
     JOB_QUEUE_NAME,
+    LLM_QUEUE_NAME,
+    LLM_WORKER_SECRET,
     CERTS_ENABLED,
     DB_TYPE,
     AWS_ROUTE_53_HOSTED_ZONE_ID,
