@@ -1372,6 +1372,276 @@ const handleGetPublishStatuses = (req, res, userId, gameId) => {
     });
 };
 
+// ---------------------------------------------------------------------------
+// Submit an LLM "modify my game" request.
+// Fetches the game's current index.js, then enqueues a job containing the
+// source + the user's prompt for the self-hosted MLX worker to process.
+// ---------------------------------------------------------------------------
+
+const handleSubmitLLMRequest = (req, res, userId, gameId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const prompt = (body.prompt || '').trim();
+        if (!prompt) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'prompt is required' }));
+            return;
+        }
+        if (prompt.length > 2000) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'prompt must be 2000 characters or fewer' }));
+            return;
+        }
+
+        getGame(gameId).then(game => {
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'Not your game' }));
+                return;
+            }
+
+            ensureForgejoUser(userId).then(() => {
+                const [owner, repo] = game.forgejoRepo.split('/');
+                getFileContents(owner, repo, 'index.js').then(fileData => {
+                    const sourceContent = Buffer.from(fileData.content, 'base64').toString('utf8');
+                    const baseSha = fileData.sha;
+
+                    getMongoCollection('llmRequests').then(collection => {
+                        // Rate limit: 1 request per 2 minutes per user
+                        const twoMinutesAgo = Date.now() - 2 * 60 * 1000;
+                        collection.findOne(
+                            { userId, created: { $gt: twoMinutesAgo } },
+                            { sort: { created: -1 } }
+                        ).then(recent => {
+                            if (recent) {
+                                const waitSecs = Math.ceil((recent.created + 2 * 60 * 1000 - Date.now()) / 1000);
+                                res.writeHead(429, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({
+                                    error: `AI edit limit: 1 request per 2 minutes. Try again in ${waitSecs} second${waitSecs === 1 ? '' : 's'}.`,
+                                }));
+                                return;
+                            }
+
+                            // Reject if one is already in flight for this game
+                            collection.findOne({
+                                gameId,
+                                status: { $in: ['PENDING', 'PROCESSING'] }
+                            }).then(existing => {
+                                if (existing) {
+                                    res.writeHead(409);
+                                    res.end(JSON.stringify({
+                                        error: 'An AI edit for this game is already in progress',
+                                        requestId: existing.requestId,
+                                    }));
+                                    return;
+                                }
+
+                                const requestId = generateId();
+                                const record = {
+                                    requestId,
+                                    userId,
+                                    gameId,
+                                    prompt,
+                                    baseSha,
+                                    status: 'PENDING',
+                                    created: Date.now(),
+                                };
+
+                                collection.insertOne(record).then(() => {
+                                    const amqp = require('amqplib/callback_api');
+                                    const { QUEUE_HOST, LLM_QUEUE_NAME } = require('./config');
+
+                                    amqp.connect(`amqp://${QUEUE_HOST}`, (cErr, conn) => {
+                                        if (cErr) {
+                                            console.error('Failed to connect to queue', cErr);
+                                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                                            res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                            return;
+                                        }
+
+                                        conn.createChannel((chErr, channel) => {
+                                            if (chErr) {
+                                                console.error('Failed to create channel', chErr);
+                                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                                res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                                return;
+                                            }
+
+                                            channel.assertQueue(LLM_QUEUE_NAME, { durable: true });
+                                            channel.sendToQueue(
+                                                LLM_QUEUE_NAME,
+                                                Buffer.from(JSON.stringify({
+                                                    requestId,
+                                                    gameId,
+                                                    userId,
+                                                    prompt,
+                                                    baseSha,
+                                                    source: sourceContent,
+                                                })),
+                                                { persistent: true }
+                                            );
+
+                                            console.log(`LLM request ${requestId} enqueued for ${gameId}`);
+
+                                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                                            res.end(JSON.stringify({ requestId, status: 'PENDING', queued: true }));
+
+                                            setTimeout(() => { try { conn.close(); } catch (e) {} }, 500);
+                                        });
+                                    });
+                                }).catch(insErr => {
+                                    console.error('Failed to create LLM request record', insErr);
+                                    res.writeHead(500);
+                                    res.end(JSON.stringify({ error: 'Failed to create AI edit request' }));
+                                });
+                            });
+                        });
+                    }).catch(() => {
+                        res.writeHead(500);
+                        res.end(JSON.stringify({ error: 'Database error' }));
+                    });
+                }).catch(fcErr => {
+                    console.error('Failed to fetch index.js', fcErr);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Could not read game source' }));
+                });
+            }).catch(auErr => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: typeof auErr === 'string' ? auErr : 'Account setup failed' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Get LLM request status. With ?id=<requestId> returns that request;
+// otherwise returns the most recent requests for the game.
+// ---------------------------------------------------------------------------
+
+const handleGetLLMStatus = (req, res, userId, gameId) => {
+    const { id } = url.parse(req.url, true).query;
+
+    getMongoCollection('llmRequests').then(collection => {
+        const project = (r) => ({
+            requestId: r.requestId,
+            status: r.status,
+            prompt: r.prompt,
+            result: r.status === 'COMPLETED' ? r.result : undefined,
+            error: r.error || null,
+            created: r.created,
+            completedAt: r.completedAt || null,
+        });
+
+        if (id) {
+            collection.findOne({ requestId: id, gameId }).then(r => {
+                if (!r) {
+                    res.writeHead(404);
+                    res.end(JSON.stringify({ error: 'Request not found' }));
+                    return;
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ request: project(r) }));
+            }).catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+            return;
+        }
+
+        collection.find({ gameId })
+            .sort({ created: -1 })
+            .limit(20)
+            .toArray()
+            .then(requests => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ requests: requests.map(project) }));
+            })
+            .catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Failed to get AI edit statuses' }));
+            });
+    }).catch(() => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Database error' }));
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Result ingestion from the self-hosted MLX worker.
+// Authenticated with the shared LLM_WORKER_SECRET, not a user JWT.
+// ---------------------------------------------------------------------------
+
+const handleLLMResult = (req, res) => {
+    const { LLM_WORKER_SECRET } = require('./config');
+
+    const auth = req.headers.authorization || '';
+    if (!LLM_WORKER_SECRET || auth !== `Bearer ${LLM_WORKER_SECRET}`) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+    }
+
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const { requestId, status, result, error } = body;
+        if (!requestId || !['COMPLETED', 'FAILED'].includes(status)) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'requestId and a valid status are required' }));
+            return;
+        }
+        if (status === 'COMPLETED' && typeof result !== 'string') {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'result is required for COMPLETED status' }));
+            return;
+        }
+
+        getMongoCollection('llmRequests').then(collection => {
+            const update = { status, completedAt: Date.now() };
+            if (status === 'COMPLETED') update.result = result;
+            if (status === 'FAILED') update.error = error || 'Unknown error';
+
+            collection.updateOne(
+                { requestId, status: { $in: ['PENDING', 'PROCESSING'] } },
+                { '$set': update }
+            ).then(r => {
+                if (r.matchedCount === 0) {
+                    res.writeHead(404);
+                    res.end(JSON.stringify({ error: 'No in-flight request with that id' }));
+                    return;
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true }));
+            }).catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        }).catch(() => {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'Database error' }));
+        });
+    });
+};
+
 module.exports = {
     handleStudioCreateGame,
     handleGetTemplates,
@@ -1389,6 +1659,9 @@ module.exports = {
     handleSubmitPublishRequest,
     handleGetPublishStatuses,
     handleSetGameThumbnail,
+    handleSubmitLLMRequest,
+    handleGetLLMStatus,
+    handleLLMResult,
 };
 
 // ---------------------------------------------------------------------------

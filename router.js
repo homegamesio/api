@@ -68,6 +68,9 @@ const studioGetTemplatesRegex = '/studio/templates';
 const studioPublishRegex = '/studio/games/(\\S*)/publish';
 const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
 const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
+const studioLLMModifyRegex = '/studio/games/(\\S*)/llm-modify';
+const studioLLMStatusRegex = '/studio/games/(\\S*)/llm-status';
+const llmResultRegex = '/internal/llm-result';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
 const deleteDeveloperRegex = '/admin/developers/(\\S*)';
@@ -154,6 +157,8 @@ const buildRequestHandlers = (h, s) => ({
         [studioRestoreVersionRegex]: { requiresAuth: true, handle: s.handleRestoreVersion },
         [studioSetThumbnailRegex]: { requiresAuth: true, handle: s.handleSetGameThumbnail },
         [studioPublishRegex]: { requiresAuth: true, handle: s.handleSubmitPublishRequest },
+        [studioLLMModifyRegex]: { requiresAuth: true, handle: s.handleSubmitLLMRequest },
+        [llmResultRegex]: { handle: s.handleLLMResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
@@ -188,6 +193,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioGetFilesRegex]: { requiresAuth: true, handle: s.handleGetFiles },
         [studioGetFileContentRegex]: { requiresAuth: true, handle: s.handleGetFileContent },
         [studioPublishStatusRegex]: { requiresAuth: true, handle: s.handleGetPublishStatuses },
+        [studioLLMStatusRegex]: { requiresAuth: true, handle: s.handleGetLLMStatus },
         [studioGetCloneInfoRegex]: { requiresAuth: true, handle: s.handleGetCloneInfo },
         [studioGetVersionsRegex]: { requiresAuth: true, handle: s.handleGetVersions },
         [studioGetTemplatesRegex]: { handle: s.handleGetTemplates },
