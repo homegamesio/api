@@ -269,8 +269,9 @@ const handlePostCertRequest = (req, res) => {
             res.end(zippedB64);
         });
     }).catch(err => {
-        res.writeHead(400);
-        res.end(err);
+        console.log('cert request failed: ' + err);
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end(String(err && err.message ? err.message : err));
     });
 };
 
