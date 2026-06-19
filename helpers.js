@@ -244,6 +244,9 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                     } else {
                         conn.createChannel((err1, channel) => {
                             if (err1) {
+                                // Close the connection so a channel-creation failure
+                                // doesn't leak it.
+                                conn.close();
                                 reject(err1);
                             } else {
                                 channel.assertQueue(JOB_QUEUE_NAME, {
@@ -251,12 +254,23 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                                 });
                                 acme.crypto.createPrivateKey().then(key => {
                                     const requestId = generateId();
-                                    acme.crypto.createCsr({
+                                    return acme.crypto.createCsr({
                                         commonName: `${getUserHash(publicIp)}.${CERT_DOMAIN}`
                                     }).then(([certKey, certCsr]) => {
                                         channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
-                                        resolve({ key: certKey.toString() });
+                                        // Gracefully close the channel (the close
+                                        // handshake flushes the publish frame) then the
+                                        // connection, so we don't leak one per request.
+                                        channel.close(() => {
+                                            conn.close();
+                                            resolve({ key: certKey.toString() });
+                                        });
                                     });
+                                }).catch(acmeErr => {
+                                    // ACME key/CSR generation failed — close the
+                                    // connection and reject instead of hanging + leaking.
+                                    conn.close();
+                                    reject(acmeErr);
                                 });
                             }
                         });

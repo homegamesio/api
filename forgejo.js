@@ -7,12 +7,12 @@ if (!CREDENTIALS_DIR) {
     throw new Error('CREDENTIALS_DIRECTORY environment variable is not set');
 }
 
-const FORGEJO_ADMIN_TOKEN = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-admin-token`, 'utf-8').trim();
+const FORGEJO_ADMIN_TOKEN = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-admin-token`, 'utf-8').replace(/[\r\n]+/g, '').trim();
 if (!FORGEJO_ADMIN_TOKEN) {
     throw new Error('forgejo-admin-token credential file is empty');
 }
 
-const FORGEJO_USER_SECRET = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-user-secret`, 'utf-8').trim();
+const FORGEJO_USER_SECRET = fs.readFileSync(`${CREDENTIALS_DIR}/forgejo-user-secret`, 'utf-8').replace(/[\r\n]+/g, '').trim();
 if (!FORGEJO_USER_SECRET) {
     throw new Error('forgejo-user-secret credential file is empty');
 }

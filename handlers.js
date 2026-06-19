@@ -36,15 +36,26 @@ const rateLimit = (key, windowMs, max) => {
     };
 };
 
+// Returns the real source IP as seen by our trusted nginx hop.
+// nginx (with the standard `$proxy_add_x_forwarded_for`) APPENDS the connecting
+// peer's IP to any client-supplied X-Forwarded-For, so the trustworthy value is
+// the RIGHTMOST entry — the leftmost entries are attacker-controllable and must
+// not be used for authz (cert/DNS ownership is bound to this value).
+// NOTE: assumes a single trusted proxy (nginx). If a CDN is ever placed in
+// front of nginx, this must take the appropriate trusted hop instead.
 const getClientIP = (req) => {
     const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) return forwarded.split(',')[0].trim();
+    if (forwarded) {
+        const hops = forwarded.split(',').map(h => h.trim()).filter(Boolean);
+        if (hops.length) return hops[hops.length - 1];
+    }
     return req.socket?.remoteAddress || 'unknown';
 };
 
 const assetUploadLimiter = rateLimit('asset-upload', 60 * 1000, 5);     // 5 uploads per minute per IP
 const signupLimiter = rateLimit('signup', 24 * 60 * 60 * 1000, 1);       // 1 signup per 24 hours per IP
 const sessionCreateLimiter = rateLimit('session-create', 60 * 1000, 1);  // 1 session per minute per IP
+const certRequestLimiter = rateLimit('cert-request', 60 * 60 * 1000, 5); // 5 cert requests per hour per IP (each triggers a real ACME order)
 const { generateId, getHash, generateJwt } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
@@ -242,7 +253,14 @@ const handleAdminAck = (req, res, userId) => {
 
 const handlePostCertRequest = (req, res) => {
     console.log('need to request a cert');
-    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    // Bind the cert to the REAL source IP (anonymous, but you can only request a
+    // cert for the network you're actually connecting from — not a spoofed XFF).
+    const requesterIp = getClientIP(req);
+    if (!certRequestLimiter(requesterIp)) {
+        res.writeHead(429, { 'Content-Type': 'text/plain' });
+        res.end('Too many certificate requests. Please try again later.');
+        return;
+    }
     handleCertRequest(requesterIp).then(response => {
         zipCert(response).then((zippedB64) => {
             res.writeHead(200, {
@@ -642,7 +660,9 @@ const handleGetMap = (req, res) => {
 };
 
 const handleGetCertStatus = (req, res) => {
-    const requesterIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    // Real source IP only — status/cert for a network is readable only from that
+    // network, not by anyone supplying a spoofed X-Forwarded-For.
+    const requesterIp = getClientIP(req);
     getCertStatus(requesterIp).then((certStatus) => {
         const body = certStatus;
         getDnsRecord(requesterIp).then((dnsRecord) => {
