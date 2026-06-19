@@ -2,11 +2,10 @@ const https = require('https');
 const fs = require('fs');
 const archiver = require('archiver');
 const acme = require('acme-client');
-const { getUserHash } = require('homegames-common');
 const { Binary } = require('mongodb');
 const amqp = require('amqplib/callback_api');
 const { CERT_DOMAIN, CERTS_ENABLED, QUEUE_HOST, JOB_QUEUE_NAME, AWS_ROUTE_53_HOSTED_ZONE_ID } = require('./config');
-const { generateId } = require('./crypto');
+const { generateId, getHash } = require('./crypto');
 const { getMongoCollection, createAssetRecord, getCertStatus } = require('./db');
 const { publishRequestMessage } = require('./queue');
 
@@ -95,7 +94,7 @@ const submitPublishRequest = (userId, gameId, fields, files) => new Promise((res
 });
 
 const getDnsRecord = (publicIp) => new Promise((resolve, reject) => {
-    const name = `${getUserHash(publicIp)}.${CERT_DOMAIN}`;
+    const name = `${getHash(publicIp)}.${CERT_DOMAIN}`;
     const params = {
         HostedZoneId: AWS_ROUTE_53_HOSTED_ZONE_ID,
         StartRecordName: name,
@@ -255,7 +254,7 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                                 acme.crypto.createPrivateKey().then(key => {
                                     const requestId = generateId();
                                     return acme.crypto.createCsr({
-                                        commonName: `${getUserHash(publicIp)}.${CERT_DOMAIN}`
+                                        commonName: `${getHash(publicIp)}.${CERT_DOMAIN}`
                                     }).then(([certKey, certCsr]) => {
                                         channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
                                         // Gracefully close the channel (the close
