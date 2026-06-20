@@ -1460,7 +1460,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
 
                                 collection.insertOne(record).then(() => {
                                     const amqp = require('amqplib/callback_api');
-                                    const { QUEUE_HOST, LLM_QUEUE_NAME } = require('./config');
+                                    const { QUEUE_HOST, JOB_QUEUE_NAME } = require('./config');
 
                                     amqp.connect(`amqp://${QUEUE_HOST}`, (cErr, conn) => {
                                         if (cErr) {
@@ -1478,10 +1478,14 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                                 return;
                                             }
 
-                                            channel.assertQueue(LLM_QUEUE_NAME, { durable: true });
+                                            // LLM jobs now ride the unified homegames-jobs
+                                            // queue as a typed message; the consolidated
+                                            // worker dispatches on `type`.
+                                            channel.assertQueue(JOB_QUEUE_NAME, { durable: true });
                                             channel.sendToQueue(
-                                                LLM_QUEUE_NAME,
+                                                JOB_QUEUE_NAME,
                                                 Buffer.from(JSON.stringify({
+                                                    type: 'LLM_REQUEST',
                                                     requestId,
                                                     gameId,
                                                     userId,

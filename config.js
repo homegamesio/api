@@ -4,9 +4,10 @@ const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
 const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 
-// Dedicated queue for LLM "modify my game" requests. Consumed by the
-// self-hosted MLX worker. Kept separate so that worker's broker credentials
-// can be scoped to just this queue.
+// DEPRECATED: LLM "modify my game" requests now ride the unified
+// JOB_QUEUE_NAME queue as { type: 'LLM_REQUEST', ... } (see
+// handleSubmitLLMRequest). Kept only to avoid breaking any external reference;
+// nothing in this codebase publishes here anymore.
 const LLM_QUEUE_NAME = process.env.LLM_QUEUE_NAME || 'llm_requests';
 
 // Shared secret the self-hosted MLX worker uses to post results back to the
