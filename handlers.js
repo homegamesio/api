@@ -4,7 +4,7 @@ const multiparty = require('multiparty');
 const { v4: uuidv4 } = require('uuid');
 const { Binary } = require('mongodb');
 
-const { MAX_SIZE } = require('./config');
+const { MAX_SIZE, CERT_DOMAIN } = require('./config');
 
 // ---------------------------------------------------------------------------
 // Rate limiters
@@ -261,17 +261,30 @@ const handlePostCertRequest = (req, res) => {
         res.end('Too many certificate requests. Please try again later.');
         return;
     }
-    handleCertRequest(requesterIp).then(response => {
-        zipCert(response).then((zippedB64) => {
-            res.writeHead(200, {
-                'Content-Type': 'application/octet-stream'
-            });
-            res.end(zippedB64);
+    // The client generates the keypair locally and submits only the CSR (public
+    // key); the TLS private key never reaches us.
+    getReqBody(req, (_body, bodyErr) => {
+        if (bodyErr) {
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Could not read request body');
+            return;
+        }
+        let csr;
+        try {
+            csr = JSON.parse(_body).csr;
+        } catch (parseErr) {
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Invalid request body');
+            return;
+        }
+        handleCertRequest(requesterIp, csr).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ submitted: true }));
+        }).catch(err => {
+            console.log('cert request failed: ' + err);
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end(String(err && err.message ? err.message : err));
         });
-    }).catch(err => {
-        console.log('cert request failed: ' + err);
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end(String(err && err.message ? err.message : err));
     });
 };
 
@@ -666,6 +679,10 @@ const handleGetCertStatus = (req, res) => {
     const requesterIp = getClientIP(req);
     getCertStatus(requesterIp).then((certStatus) => {
         const body = certStatus;
+        // The domain this network is allowed to request a cert for. The client
+        // needs this to build a CSR with the correct common name, since only we
+        // know its (trusted) public IP.
+        body.certDomain = `${getHash(requesterIp)}.${CERT_DOMAIN}`;
         getDnsRecord(requesterIp).then((dnsRecord) => {
             console.log('this is the dns record');
             console.log(dnsRecord);

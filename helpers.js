@@ -229,13 +229,34 @@ const zipCert = (certData) => new Promise((resolve, reject) => {
     archive.finalize();
 });
 
-const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
+// The client generates the cert keypair locally and sends us only the CSR
+// (public key) — the TLS private key never leaves the client. We still generate
+// the ACME *account* key here (it only authenticates to Let's Encrypt; it is not
+// the cert's key) and hand it to the worker along with the client's CSR.
+const handleCertRequest = (publicIp, csr) => new Promise((resolve, reject) => {
     if (!CERTS_ENABLED) {
         reject('Certs not available in this environment');
+    } else if (!csr) {
+        reject('Missing CSR');
     } else {
+        // SECURITY: the requester picks the CSR's common name, but a network may
+        // only obtain a cert for the subdomain bound to its (trusted) source IP.
+        // Reject any CSR whose CN doesn't match, otherwise a client could request
+        // a valid cert for another network's subdomain.
+        const expectedCommonName = `${getHash(publicIp)}.${CERT_DOMAIN}`;
+        let csrCommonName;
+        try {
+            csrCommonName = acme.crypto.readCsrDomains(csr).commonName;
+        } catch (parseErr) {
+            return reject('Invalid CSR');
+        }
+        if (csrCommonName !== expectedCommonName) {
+            return reject(`CSR common name (${csrCommonName}) does not match the domain assigned to this network (${expectedCommonName})`);
+        }
+
         getCertStatus(publicIp).then(certInfo => {
             if (certInfo.cert && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
-                reject('A valid cert has already been created for this IP (' + publicIp + ').  If you do not have access to your private key, contact us to generate a new one');
+                reject('A valid cert has already been created for this IP (' + publicIp + ').');
             } else {
                 amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
                     if (err) {
@@ -252,21 +273,19 @@ const handleCertRequest = (publicIp) => new Promise((resolve, reject) => {
                                     durable: true
                                 });
                                 acme.crypto.createPrivateKey().then(key => {
-                                    const requestId = generateId();
-                                    return acme.crypto.createCsr({
-                                        commonName: `${getHash(publicIp)}.${CERT_DOMAIN}`
-                                    }).then(([certKey, certCsr]) => {
-                                        channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: certCsr })), { persistent: true });
-                                        // Gracefully close the channel (the close
-                                        // handshake flushes the publish frame) then the
-                                        // connection, so we don't leak one per request.
-                                        channel.close(() => {
-                                            conn.close();
-                                            resolve({ key: certKey.toString() });
-                                        });
+                                    // Queue the CSR as a Buffer so it serializes to the
+                                    // same {type:'Buffer',data:[...]} shape the worker
+                                    // already reads via data.cert.data.
+                                    channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: Buffer.from(csr) })), { persistent: true });
+                                    // Gracefully close the channel (the close
+                                    // handshake flushes the publish frame) then the
+                                    // connection, so we don't leak one per request.
+                                    channel.close(() => {
+                                        conn.close();
+                                        resolve({ submitted: true });
                                     });
                                 }).catch(acmeErr => {
-                                    // ACME key/CSR generation failed — close the
+                                    // ACME account-key generation failed — close the
                                     // connection and reject instead of hanging + leaking.
                                     conn.close();
                                     reject(acmeErr);
