@@ -1462,25 +1462,43 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                     const amqp = require('amqplib/callback_api');
                                     const { QUEUE_HOST, JOB_QUEUE_NAME } = require('./config');
 
-                                    amqp.connect(`amqp://${QUEUE_HOST}`, (cErr, conn) => {
+                                    let responded = false;
+                                    const respond = (queued) => {
+                                        if (responded) return;
+                                        responded = true;
+                                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                                        res.end(JSON.stringify({ requestId, status: 'PENDING', queued }));
+                                    };
+
+                                    // frameMax=0 keeps the broker's offered frame size; with
+                                    // amqplib's 4096 default this broker ECONNRESETs mid-handshake
+                                    // (see worker/index.js). The LLM source can be large, so this
+                                    // matters here more than for the small cert/image publishes.
+                                    amqp.connect(`amqp://${QUEUE_HOST}?frameMax=0`, (cErr, conn) => {
                                         if (cErr) {
                                             console.error('Failed to connect to queue', cErr);
-                                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                                            res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                            respond(false);
                                             return;
                                         }
 
-                                        conn.createChannel((chErr, channel) => {
+                                        // Without this, a post-connect socket error throws unhandled.
+                                        conn.on('error', (e) => { console.error('Queue connection error', e); respond(false); });
+
+                                        // Confirm channel: the broker acks receipt, so we only
+                                        // report queued:true and close once the message is durably
+                                        // enqueued. The old fire-and-forget sendToQueue +
+                                        // setTimeout(close, 500) silently dropped large messages
+                                        // whose frames hadn't flushed before the connection closed.
+                                        conn.createConfirmChannel((chErr, channel) => {
                                             if (chErr) {
                                                 console.error('Failed to create channel', chErr);
-                                                res.writeHead(200, { 'Content-Type': 'application/json' });
-                                                res.end(JSON.stringify({ requestId, status: 'PENDING', queued: false }));
+                                                respond(false);
+                                                try { conn.close(); } catch (e) {}
                                                 return;
                                             }
 
-                                            // LLM jobs now ride the unified homegames-jobs
-                                            // queue as a typed message; the consolidated
-                                            // worker dispatches on `type`.
+                                            // LLM jobs ride the unified homegames-jobs queue as a
+                                            // typed message; the consolidated worker dispatches on `type`.
                                             channel.assertQueue(JOB_QUEUE_NAME, { durable: true });
                                             channel.sendToQueue(
                                                 JOB_QUEUE_NAME,
@@ -1493,15 +1511,18 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                                     baseSha,
                                                     source: sourceContent,
                                                 })),
-                                                { persistent: true }
+                                                { persistent: true },
+                                                (confErr) => {
+                                                    if (confErr) {
+                                                        console.error(`LLM publish NACKed for ${requestId}`, confErr);
+                                                        respond(false);
+                                                    } else {
+                                                        console.log(`LLM request ${requestId} enqueued for ${gameId}`);
+                                                        respond(true);
+                                                    }
+                                                    channel.close(() => { try { conn.close(); } catch (e) {} });
+                                                }
                                             );
-
-                                            console.log(`LLM request ${requestId} enqueued for ${gameId}`);
-
-                                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                                            res.end(JSON.stringify({ requestId, status: 'PENDING', queued: true }));
-
-                                            setTimeout(() => { try { conn.close(); } catch (e) {} }, 500);
                                         });
                                     });
                                 }).catch(insErr => {

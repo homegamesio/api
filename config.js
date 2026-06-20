@@ -8,7 +8,6 @@ const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 // JOB_QUEUE_NAME queue as { type: 'LLM_REQUEST', ... } (see
 // handleSubmitLLMRequest). Kept only to avoid breaking any external reference;
 // nothing in this codebase publishes here anymore.
-const LLM_QUEUE_NAME = process.env.LLM_QUEUE_NAME || 'llm_requests';
 
 // Shared secret the self-hosted MLX worker uses to post results back to the
 // API. NOT a user JWT — this authenticates the worker, not a person.
@@ -54,7 +53,6 @@ const MAX_SIZE = 6 * 1024 * 1024;
 module.exports = {
     CERT_DOMAIN,
     JOB_QUEUE_NAME,
-    LLM_QUEUE_NAME,
     LLM_WORKER_SECRET,
     CERTS_ENABLED,
     DB_TYPE,
