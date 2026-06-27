@@ -47,6 +47,16 @@ const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
 const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
+// Public URL of the website (homegamesio) — used to build links in emails and
+// to redirect to after email verification.
+const WEB_PUBLIC_URL = process.env.WEB_PUBLIC_URL || 'http://localhost:80';
+
+// AWS SES (transactional email — developer signup verification).
+// SES_FROM_ADDRESS must be a verified SES identity; if unset, verification
+// emails are skipped (the link is logged) so local/dev signup still works.
+const SES_REGION = process.env.SES_REGION || 'us-east-1';
+const SES_FROM_ADDRESS = process.env.SES_FROM_ADDRESS || '';
+
 // 6 MB max per asset
 const MAX_SIZE = 6 * 1024 * 1024;
 
@@ -75,4 +85,7 @@ module.exports = {
     FORGEJO_WEBHOOK_SECRET,
     API_PUBLIC_URL,
     HOMENAMES_URL,
+    WEB_PUBLIC_URL,
+    SES_REGION,
+    SES_FROM_ADDRESS,
 };

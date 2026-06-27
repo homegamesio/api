@@ -81,6 +81,10 @@ const getHash = (input) => {
 
 const generateId = () => getHash(uuidv4());
 
+// Cryptographically-random opaque token (e.g. email verification links).
+// The raw token goes in the link; only its hashValue() is stored.
+const generateToken = () => crypto.randomBytes(32).toString('hex');
+
 module.exports = {
     base64UrlDecode,
     base64UrlEncode,
@@ -91,4 +95,5 @@ module.exports = {
     hashPassword,
     getHash,
     generateId,
+    generateToken,
 };

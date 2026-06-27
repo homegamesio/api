@@ -1,4 +1,5 @@
 const { verifyToken } = require('./crypto');
+const { getUserRecord } = require('./db');
 
 // Route regex patterns
 const publishRequestsRegex = '/games/(\\S*)/publish_requests';
@@ -12,6 +13,11 @@ const adminListSupportMessagesRegex = '/admin/support_messages';
 const adminAckRegex = '/admin/acknowledge';
 const adminListPendingPublishRequestsRegex = '/admin/publish_requests';
 const adminListFailedPublishRequestsRegex = '/admin/publish_requests/failed';
+const adminUsersRegex = '/admin/users';
+const adminGamesRegex = '/admin/games';
+const adminAssetsRegex = '/admin/assets';
+const adminStatsRegex = '/admin/stats';
+const adminAssetNsfwRegex = '/admin/assets/(\\S*)/nsfw';
 const assetsListRegex = '/assets';
 const publicAssetsCatalogRegex = '/catalog/assets';
 const verifyPublishRequestRegex = '/verify_publish_request';
@@ -25,6 +31,11 @@ const serviceRequestsRegex = '/service_requests/(\\S*)';
 const loginRegex = '/auth/login';
 const signupRegex = '/auth/signup';
 const refreshRegex = '/auth/refresh';
+const verifyEmailRegex = '/auth/verify';
+const resendVerificationRegex = '/auth/resend';
+const meRegex = '/auth/me';
+const forgotPasswordRegex = '/auth/forgot';
+const resetPasswordRegex = '/auth/reset';
 const createBlogRegex = '/admin/blog';
 const blogRegex = '/blog';
 const blogDetailRegex = '/blog/(\\S*)';
@@ -101,11 +112,28 @@ const dispatchRequest = (req, res, requestHandlers) => {
                     const authHeader = req.headers.authorization;
 
                     if (!authHeader) {
+                        res.writeHead(401);
                         res.end('API requires authorization');
                     } else {
-                        console.log('hmmm');
                         verifyToken(authHeader).then((userInfo) => {
-                            handlerInfo.handle(req, res, userInfo.userId, ...matchedParams);
+                            if (handlerInfo.requiresVerified) {
+                                // Gate code-execution / upload actions on a
+                                // verified email address.
+                                getUserRecord(userInfo.userId).then((user) => {
+                                    if (!user || !user.verified) {
+                                        res.writeHead(403, { 'Content-Type': 'application/json' });
+                                        res.end(JSON.stringify({ error: 'Email verification required' }));
+                                    } else {
+                                        handlerInfo.handle(req, res, userInfo.userId, ...matchedParams);
+                                    }
+                                }).catch(err => {
+                                    console.error(err);
+                                    res.writeHead(500);
+                                    res.end('error');
+                                });
+                            } else {
+                                handlerInfo.handle(req, res, userInfo.userId, ...matchedParams);
+                            }
                         }).catch(err => {
                             console.error(err);
                             res.writeHead(401);
@@ -139,31 +167,41 @@ const buildRequestHandlers = (h, s) => ({
         [certRequestRegex]: { handle: h.handlePostCertRequest },
         [bugsRegex]: { handle: h.handleBugs },
         [contactRegex]: { handle: h.handleContact },
-        [createGameRegex]: { requiresAuth: true, handle: h.handleCreateGame },
+        [createGameRegex]: { requiresAuth: true, requiresVerified: true, handle: h.handleCreateGame },
         [assetTagsRegex]: { requiresAuth: true, handle: h.handleUpdateAssetTags },
         [assetMetaRegex]: { requiresAuth: true, handle: h.handleUpdateAssetMeta },
-        [createAssetRegex]: { requiresAuth: true, handle: h.handleCreateAsset },
-        [gamePublishRegex]: { requiresAuth: true, handle: h.handleGamePublish },
-        [gameUpdateRegex]: { requiresAuth: true, handle: h.handleGameUpdate },
+        [createAssetRegex]: { requiresAuth: true, requiresVerified: true, handle: h.handleCreateAsset },
+        [gamePublishRegex]: { requiresAuth: true, requiresVerified: true, handle: h.handleGamePublish },
+        [gameUpdateRegex]: { requiresAuth: true, requiresVerified: true, handle: h.handleGameUpdate },
         [servicesRegex]: { handle: h.handleServices },
-        [submitPublishRequestRegex]: { requiresAuth: true, handle: h.handleSubmitPublishRequest },
+        [submitPublishRequestRegex]: { requiresAuth: true, requiresVerified: true, handle: h.handleSubmitPublishRequest },
         [createBlogRegex]: { requiresAuth: true, handle: h.handleCreateBlog },
         [signupRegex]: { handle: h.handleSignup },
         [loginRegex]: { handle: h.handleLogin },
+        [forgotPasswordRegex]: { handle: h.handleForgotPassword },
+        [resetPasswordRegex]: { handle: h.handleResetPassword },
         [refreshRegex]: { requiresAuth: true, handle: h.handleRefreshToken },
+        [verifyEmailRegex]: { requiresAuth: true, handle: h.handleVerifyCode },
+        [resendVerificationRegex]: { requiresAuth: true, handle: h.handleResendVerification },
         [requestActionRegex]: { requiresAuth: true, handle: h.handleRequestAction },
-        [studioCreateGameRegex]: { requiresAuth: true, handle: s.handleStudioCreateGame },
-        [studioSaveVersionRegex]: { requiresAuth: true, handle: s.handleSaveVersion },
-        [studioRestoreVersionRegex]: { requiresAuth: true, handle: s.handleRestoreVersion },
-        [studioSetThumbnailRegex]: { requiresAuth: true, handle: s.handleSetGameThumbnail },
-        [studioPublishRegex]: { requiresAuth: true, handle: s.handleSubmitPublishRequest },
-        [studioLLMModifyRegex]: { requiresAuth: true, handle: s.handleSubmitLLMRequest },
+        [studioCreateGameRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleStudioCreateGame },
+        [studioSaveVersionRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSaveVersion },
+        [studioRestoreVersionRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleRestoreVersion },
+        [studioSetThumbnailRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSetGameThumbnail },
+        [studioPublishRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitPublishRequest },
+        [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
         [llmResultRegex]: { handle: s.handleLLMResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
+        [adminAssetNsfwRegex]: { requiresAuth: true, handle: h.handleAdminSetAssetNsfw },
     },
     'GET': {
+        [meRegex]: { requiresAuth: true, handle: h.handleMe },
+        [adminUsersRegex]: { requiresAuth: true, handle: h.handleAdminListUsers },
+        [adminGamesRegex]: { requiresAuth: true, handle: h.handleAdminListGames },
+        [adminAssetsRegex]: { requiresAuth: true, handle: h.handleAdminListAssets },
+        [adminStatsRegex]: { requiresAuth: true, handle: h.handleAdminStats },
         [mapRegex]: { handle: h.handleGetMap },
         [certStatusRegex]: { handle: h.handleGetCertStatus },
         [assetsRegex]: { handle: h.handleGetAsset },

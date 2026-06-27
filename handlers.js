@@ -69,10 +69,11 @@ const {
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
     updateAssetTags, listPublicAssets, updateAsset, deleteAsset,
     deleteDeveloper,
+    adminListUsers, adminListGames, adminListAllAssets, adminGetStats, setAssetNsfw,
 } = require('./db');
 const { listGames, listPublicGamesForAuthor, deleteGame: searchDeleteGame } = require('./search');
 const { createGameImagePublishRequest, createContentRequest, createProfileImageTask } = require('./queue');
-const { login, signup } = require('./auth');
+const { login, signup, verifyEmail, resendVerification, requestPasswordReset, resetPassword } = require('./auth');
 const { detectMime } = require('./detect');
 const { classifyImage } = require('./nsfw');
 const {
@@ -129,7 +130,7 @@ const handleDeleteDeveloper = (req, res, userId, devId) => {
         // Clean up Forgejo repos for all the developer's games
         getMongoCollection('games').then(gamesCollection => {
             gamesCollection.find({ developerId: devId }).toArray().then(games => {
-                const { deleteRepo } = require('./forgejo');
+                const { deleteRepo, deleteForgejoUser } = require('./forgejo');
                 const forgejoCleanups = games
                     .filter(g => g.forgejoRepo)
                     .map(g => {
@@ -143,6 +144,13 @@ const handleDeleteDeveloper = (req, res, userId, devId) => {
                 const searchCleanups = games.map(g => searchDeleteGame(g.gameId).catch(() => {}));
 
                 Promise.all([...forgejoCleanups, ...searchCleanups]).then(() => {
+                    // Finally remove the developer's Forgejo account itself (their
+                    // repos are gone above; purge=true mops up anything missed).
+                    // Best-effort — don't fail the whole delete if this errors.
+                    return deleteForgejoUser(devId).catch(err => {
+                        console.warn(`Forgejo user delete failed for ${devId}`, err);
+                    });
+                }).then(() => {
                     deleteDeveloper(devId).then(result => {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ deleted: true, userId: devId, gamesDeleted: result.gamesDeleted }));
@@ -597,11 +605,12 @@ const handleSignup = (req, res) => {
         }
 
         if (!err) {
-            signup(signupBody).then((token) => {
-                res.end(JSON.stringify({ token }));
+            signup(signupBody).then((result) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
             }).catch(signupError => {
-                res.writeHead(500);
-                res.end(JSON.stringify({ error: signupError}));
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: typeof signupError === 'string' ? signupError : 'Signup failed' }));
             });
         }
     });
@@ -625,7 +634,8 @@ const handleLogin = (req, res) => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(tokenPayload));
             }).catch(err => {
-                res.end(err.toString());
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Login failed' }));
             });
         }
     });
@@ -633,8 +643,121 @@ const handleLogin = (req, res) => {
 
 const handleRefreshToken = (req, res, userId) => {
     const token = generateJwt(userId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ token, username: userId }));
+    getUserRecord(userId).then((user) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            token,
+            displayName: user && user.displayName,
+            verified: !!(user && user.verified),
+        }));
+    }).catch(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ token }));
+    });
+};
+
+// Current authenticated user — lets the client hydrate displayName/verified
+// without re-logging-in (e.g. after clicking the email verification link).
+const handleMe = (req, res, userId) => {
+    getUserRecord(userId).then((user) => {
+        if (!user) { res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            userId: user.userId,
+            displayName: user.displayName,
+            verified: !!user.verified,
+            isAdmin: !!user.isAdmin,
+        }));
+    }).catch(() => { res.writeHead(500); res.end(JSON.stringify({ error: 'error' })); });
+};
+
+// Verify the email code for the authenticated user (POST { code }). No link /
+// token in a URL, so email-client prefetching can't consume it.
+const verifyAttemptLimiter = rateLimit('verify-attempt', 10 * 60 * 1000, 10); // 10 attempts / 10 min / user
+
+const handleVerifyCode = (req, res, userId) => {
+    if (!verifyAttemptLimiter(userId)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many attempts. Please wait a few minutes.' }));
+        return;
+    }
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end(JSON.stringify({ error: 'Error reading request' })); return; }
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            return;
+        }
+        verifyEmail(userId, body && body.code).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, verified: true }));
+        }).catch((verifyErr) => {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: typeof verifyErr === 'string' ? verifyErr : 'Verification failed' }));
+        });
+    });
+};
+
+const resendLimiter = rateLimit('verify-resend', 10 * 60 * 1000, 3); // 3 per 10 min per user
+
+const handleResendVerification = (req, res, userId) => {
+    if (!resendLimiter(userId)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many requests. Please wait a few minutes.' }));
+        return;
+    }
+    resendVerification(userId).then(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+    }).catch((err) => {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to resend' }));
+    });
+};
+
+// Forgot password: email a reset code. Always 200 (anti-enumeration).
+const forgotPasswordLimiter = rateLimit('forgot-password', 15 * 60 * 1000, 5);  // 5 / 15min / IP
+const resetPasswordLimiter = rateLimit('reset-password', 15 * 60 * 1000, 10);   // 10 / 15min / IP
+
+const handleForgotPassword = (req, res) => {
+    if (!forgotPasswordLimiter(getClientIP(req))) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many requests. Please wait a few minutes.' }));
+        return;
+    }
+    getReqBody(req, (_body) => {
+        let body; try { body = JSON.parse(_body); } catch (e) { body = {}; }
+        requestPasswordReset(body && body.email).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        });
+    });
+};
+
+// Reset password using the emailed code (user is logged out, so keyed by email).
+const handleResetPassword = (req, res) => {
+    if (!resetPasswordLimiter(getClientIP(req))) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many requests. Please wait a few minutes.' }));
+        return;
+    }
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end(JSON.stringify({ error: 'Error reading request' })); return; }
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            return;
+        }
+        resetPassword(body.email, body.code, body.newPassword).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+        }).catch((resetErr) => {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: typeof resetErr === 'string' ? resetErr : 'Reset failed' }));
+        });
+    });
 };
 
 const handleRequestAction = (req, res, userId, requestId) => {
@@ -1071,6 +1194,78 @@ const handleAdminListFailedPublishRequests = (req, res, userId) => {
     });
 };
 
+// ---------------------------------------------------------------------------
+// Admin moderation console — DB-wide listing + stats. All gated on isAdmin.
+// ---------------------------------------------------------------------------
+
+// Run fn(user) only if the caller is an admin; otherwise 403.
+const requireAdmin = (userId, res, fn) => {
+    getUserRecord(userId).then(user => {
+        if (!user || !user.isAdmin) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not an admin' }));
+            return;
+        }
+        fn(user);
+    }).catch(() => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to verify admin' }));
+    });
+};
+
+// Shared list responder: parses ?search/&page/&limit and runs a list fn.
+const adminListResponder = (req, res, listFn) => {
+    const { search, page, limit } = url.parse(req.url, true).query;
+    const lim = Math.min(Number(limit) || 25, 100);
+    const pg = Math.max(Number(page) || 1, 1);
+    const offset = (pg - 1) * lim;
+    listFn(search, lim, offset).then(({ items, count }) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ items, count, page: pg, limit: lim }));
+    }).catch(err => {
+        console.error('admin list failed', err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to list' }));
+    });
+};
+
+const handleAdminListUsers = (req, res, userId) =>
+    requireAdmin(userId, res, () => adminListResponder(req, res, adminListUsers));
+
+const handleAdminListGames = (req, res, userId) =>
+    requireAdmin(userId, res, () => adminListResponder(req, res, adminListGames));
+
+const handleAdminListAssets = (req, res, userId) =>
+    requireAdmin(userId, res, () => adminListResponder(req, res, adminListAllAssets));
+
+const handleAdminStats = (req, res, userId) =>
+    requireAdmin(userId, res, () => {
+        adminGetStats().then(stats => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(stats));
+        }).catch(err => {
+            console.error('admin stats failed', err);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to load stats' }));
+        });
+    });
+
+const handleAdminSetAssetNsfw = (req, res, userId, assetId) =>
+    requireAdmin(userId, res, () => {
+        getReqBody(req, (_body, err) => {
+            if (err) { res.writeHead(400); res.end(JSON.stringify({ error: 'Error reading request' })); return; }
+            let body;
+            try { body = JSON.parse(_body); } catch (e) { body = {}; }
+            setAssetNsfw(assetId, !!body.nsfw).then(() => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ assetId, nsfw: !!body.nsfw }));
+            }).catch(() => {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to update' }));
+            });
+        });
+    });
+
 const handleHealth = (req, res) => {
     res.end('ok!');
 };
@@ -1283,6 +1478,8 @@ module.exports = {
     handleCreateGame, handleCreateAsset, handleGamePublish, handleGameUpdate,
     handleServices,
     handleSignup, handleLogin, handleRequestAction,
+    handleVerifyCode, handleResendVerification, handleMe,
+    handleForgotPassword, handleResetPassword,
     handleGetMap, handleGetCertStatus, handleGetAsset,
     handleGetBlog, handleGetBlogDetail, handleGithubLink,
     handleGetPodcast, handleGetServiceRequest,
@@ -1291,6 +1488,8 @@ module.exports = {
     handleGetDevProfile, handleGetProfile, handleGetPublishRequests,
     handleAdminListSupportMessages, handleAdminListPendingPublishRequests,
     handleAdminListFailedPublishRequests, handleHealth,
+    handleAdminListUsers, handleAdminListGames, handleAdminListAssets,
+    handleAdminStats, handleAdminSetAssetNsfw,
     handleCreateSession, handleGetPublishedVersions,
     handleRefreshToken, handleUpdateAssetTags, handleUpdateAssetMeta,
     handleListPublicAssets,

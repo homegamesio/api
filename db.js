@@ -56,6 +56,46 @@ const getUserRecord = (userId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
+const getUserByDisplayName = (displayNameLower) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.findOne({ displayNameLower }).then(resolve).catch(reject)).catch(reject);
+});
+
+const getUserByEmail = (emailLower) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.findOne({ emailLower }).then(resolve).catch(reject)).catch(reject);
+});
+
+const createUser = (record) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.insertOne(record).then(() => resolve(record)).catch(reject)).catch(reject);
+});
+
+const setUserVerified = (userId) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.updateOne(
+        { userId },
+        { $set: { verified: true }, $unset: { verificationCodeHash: '', verificationCodeExpires: '' } }
+    ).then(resolve).catch(reject)).catch(reject);
+});
+
+const setVerificationCode = (userId, verificationCodeHash, verificationCodeExpires) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.updateOne(
+        { userId },
+        { $set: { verificationCodeHash, verificationCodeExpires } }
+    ).then(resolve).catch(reject)).catch(reject);
+});
+
+const setPasswordResetCode = (userId, resetCodeHash, resetCodeExpires) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.updateOne(
+        { userId },
+        { $set: { resetCodeHash, resetCodeExpires } }
+    ).then(resolve).catch(reject)).catch(reject);
+});
+
+const resetUserPassword = (userId, passwordHash, passwordSalt) => new Promise((resolve, reject) => {
+    getMongoCollection('users').then(c => c.updateOne(
+        { userId },
+        { $set: { passwordHash, passwordSalt }, $unset: { resetCodeHash: '', resetCodeExpires: '' } }
+    ).then(resolve).catch(reject)).catch(reject);
+});
+
 const createSupportMessage = (body, sourceIp) => new Promise((resolve, reject) => {
     const ipHash = hashValue(sourceIp);
     getMongoCollection('supportMessages').then((collection) => {
@@ -701,12 +741,87 @@ const deleteDeveloper = (userId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
+// ---------------------------------------------------------------------------
+// Admin / moderation queries
+// ---------------------------------------------------------------------------
+
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const adminPaginatedList = (collectionName, query, projection, limit, offset) => new Promise((resolve, reject) => {
+    getMongoCollection(collectionName).then(collection => {
+        collection.countDocuments(query).then(count => {
+            collection.find(query, projection ? { projection } : undefined)
+                .sort({ created: -1 })
+                .skip(Number(offset) || 0)
+                .limit(Number(limit) || 25)
+                .toArray()
+                .then(items => resolve({ items, count }))
+                .catch(reject);
+        }).catch(reject);
+    }).catch(reject);
+});
+
+const adminListUsers = (search, limit, offset) => {
+    let query = {};
+    if (search) {
+        const rx = { $regex: escapeRegex(search), $options: 'i' };
+        query = { $or: [{ displayName: rx }, { email: rx }, { userId: search }] };
+    }
+    // Never expose password/verification secrets to the admin UI.
+    return adminPaginatedList('users', query, { passwordHash: 0, passwordSalt: 0, verificationCodeHash: 0 }, limit, offset);
+};
+
+const adminListGames = (search, limit, offset) => {
+    let query = {};
+    if (search) {
+        const rx = { $regex: escapeRegex(search), $options: 'i' };
+        query = { $or: [{ name: rx }, { gameId: search }, { developerId: search }] };
+    }
+    return adminPaginatedList('games', query, null, limit, offset);
+};
+
+const adminListAllAssets = (search, limit, offset) => {
+    let query = {};
+    if (search) {
+        const rx = { $regex: escapeRegex(search), $options: 'i' };
+        query = { $or: [{ name: rx }, { assetId: search }, { developerId: search }] };
+    }
+    return adminPaginatedList('assets', query, null, limit, offset);
+};
+
+const adminGetStats = () => Promise.all([
+    getMongoCollection('users').then(c => c.countDocuments({})),
+    getMongoCollection('users').then(c => c.countDocuments({ verified: true })),
+    getMongoCollection('games').then(c => c.countDocuments({})),
+    getMongoCollection('assets').then(c => c.countDocuments({})),
+    getMongoCollection('gameVersions').then(c => c.countDocuments({ published: true })),
+    getMongoCollection('publishRequests').then(c => c.countDocuments({ status: { $in: ['PENDING', 'PROCESSING'] } })),
+]).then(([users, verifiedUsers, games, assets, publishedVersions, pendingPublish]) => ({
+    users, verifiedUsers, games, assets, publishedVersions, pendingPublish,
+}));
+
+const setAssetNsfw = (assetId, nsfw) => new Promise((resolve, reject) => {
+    getMongoCollection('assets').then(c => c.updateOne({ assetId }, { $set: { nsfw: !!nsfw } }).then(resolve).catch(reject)).catch(reject);
+});
+
 module.exports = {
     getMongoClient,
     getMongoCollection,
+    adminListUsers,
+    adminListGames,
+    adminListAllAssets,
+    adminGetStats,
+    setAssetNsfw,
     getMongoAsset,
     getMongoDocument,
     getUserRecord,
+    getUserByDisplayName,
+    getUserByEmail,
+    createUser,
+    setUserVerified,
+    setVerificationCode,
+    setPasswordResetCode,
+    resetUserPassword,
     createSupportMessage,
     createBlogPost,
     getBlogPost,

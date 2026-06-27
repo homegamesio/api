@@ -127,6 +127,12 @@ const deleteRepo = (owner, repo) => {
     return forgejoRequest('DELETE', `/repos/${owner}/${repo}`, null, { sudo: owner });
 };
 
+// Delete a Forgejo user account. purge=true removes any repos they still own,
+// so this works even if per-repo cleanup missed something.
+const deleteForgejoUser = (username) => {
+    return forgejoRequest('DELETE', `/admin/users/${username}?purge=true`);
+};
+
 // ---------------------------------------------------------------------------
 // File operations (all via admin token)
 // ---------------------------------------------------------------------------
@@ -237,6 +243,7 @@ module.exports = {
     createRepo,
     createWebhook,
     deleteRepo,
+    deleteForgejoUser,
     getFileTree,
     getFileContents,
     createOrUpdateFile,

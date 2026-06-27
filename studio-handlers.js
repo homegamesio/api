@@ -103,17 +103,17 @@ const syncForgejoPassword = (userId) => new Promise((resolve, reject) => {
 // ---------------------------------------------------------------------------
 
 const GAME_TEMPLATES = {
-    'click': {
-        label: 'Click Game',
-        description: 'A simple game where clicking changes colors. Good starting point.',
+    'blank': {
+        label: "Blank",
+        description: "An empty game with a minimal starting point.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
 
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '1010',
+            squishVersion: '138',
             author: 'Unknown',
             description: 'A new Homegames game'
         };
@@ -124,14 +124,57 @@ class MyGame extends Game {
         this.base = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
             coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
-            fill: Colors.COLORS.WHITE,
+            fill: Colors.COLORS.WHITE
+        });
+    }
+
+    handleNewPlayer({ playerId }) {
+    }
+
+    handlePlayerDisconnect(playerId) {
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'click': {
+        label: "Click",
+        description: "Click anywhere to drop colored squares. Shapes, colors, and clicks.",
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+const COLORS = Colors.COLORS;
+
+// Click anywhere to drop a randomly colored square. Demonstrates shapes,
+// colors, click handling, and adding nodes to the scene at runtime.
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '138',
+            author: 'Unknown',
+            description: 'Click anywhere to drop colored squares'
+        };
+    }
+
+    constructor() {
+        super();
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE,
             onClick: (playerId, x, y) => {
-                const color = Colors.randomColor();
                 const dot = new GameNode.Shape({
                     shapeType: Shapes.POLYGON,
                     coordinates2d: ShapeUtils.rectangle(x - 2, y - 2, 4, 4),
-                    fill: color
+                    fill: Colors.randomColor()
                 });
+                // Adding a child notifies clients automatically.
                 this.base.addChild(dot);
             }
         });
@@ -153,25 +196,31 @@ module.exports = MyGame;
         }
     },
     'keyboard': {
-        label: 'Keyboard Game',
-        description: 'A game with a movable character using arrow keys or WASD.',
+        label: "Keyboard",
+        description: "Move a square with arrow keys or WASD. Input plus a tick loop.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
 const COLORS = Colors.COLORS;
 
+// Move a square with the arrow keys or WASD. Demonstrates key input
+// (handleKeyDown/handleKeyUp) and a tick loop for smooth movement.
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '1010',
+            squishVersion: '138',
             author: 'Unknown',
-            description: 'A new Homegames game',
+            description: 'Move a square with the arrow keys or WASD',
             tickRate: 60
         };
     }
 
     constructor() {
         super();
+        this.keysDown = {};
+        this.speed = 1;
+        this.size = 10;
+
         this.base = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
             coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
@@ -180,31 +229,43 @@ class MyGame extends Game {
 
         this.player = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
-            coordinates2d: ShapeUtils.rectangle(45, 45, 10, 10),
-            fill: COLORS.BLUE
+            coordinates2d: ShapeUtils.rectangle(45, 45, this.size, this.size),
+            fill: COLORS.HG_BLUE
         });
-
         this.base.addChild(this.player);
-        this.speed = 0.5;
+    }
+
+    handleKeyDown(playerId, key) {
+        this.keysDown[key] = true;
+    }
+
+    handleKeyUp(playerId, key) {
+        delete this.keysDown[key];
+    }
+
+    tick() {
+        const coords = this.player.node.coordinates2d;
+        let x = coords[0][0];
+        let y = coords[0][1];
+
+        if (this.keysDown['ArrowUp'] || this.keysDown['w']) y -= this.speed;
+        if (this.keysDown['ArrowDown'] || this.keysDown['s']) y += this.speed;
+        if (this.keysDown['ArrowLeft'] || this.keysDown['a']) x -= this.speed;
+        if (this.keysDown['ArrowRight'] || this.keysDown['d']) x += this.speed;
+
+        x = Math.max(0, Math.min(100 - this.size, x));
+        y = Math.max(0, Math.min(100 - this.size, y));
+
+        if (x !== coords[0][0] || y !== coords[0][1]) {
+            this.player.node.coordinates2d = ShapeUtils.rectangle(x, y, this.size, this.size);
+            this.player.node.onStateChange();
+        }
     }
 
     handleNewPlayer({ playerId }) {
     }
 
     handlePlayerDisconnect(playerId) {
-    }
-
-    handleKeyDown(playerId, key) {
-        const coords = this.player.node.coordinates2d;
-        let x = coords[0][0];
-        let y = coords[0][1];
-
-        if (key === 'ArrowUp' || key === 'w') y = Math.max(0, y - this.speed);
-        if (key === 'ArrowDown' || key === 's') y = Math.min(90, y + this.speed);
-        if (key === 'ArrowLeft' || key === 'a') x = Math.max(0, x - this.speed);
-        if (key === 'ArrowRight' || key === 'd') x = Math.min(90, x + this.speed);
-
-        this.player.node.coordinates2d = ShapeUtils.rectangle(x, y, 10, 10);
     }
 
     getLayers() {
@@ -217,25 +278,29 @@ module.exports = MyGame;
         }
     },
     'multiplayer': {
-        label: 'Multiplayer Game',
-        description: 'A game that tracks players with per-player colored squares.',
+        label: "Multiplayer",
+        description: "Track players, give each a color, and show a live roster.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
 const COLORS = Colors.COLORS;
 
+// Tracks connected players, gives each a color, and shows a live roster.
+// Clicking drops a dot in your own color. Demonstrates player lifecycle,
+// per-player state, text, and per-player visibility (playerIds).
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '1010',
+            squishVersion: '138',
             author: 'Unknown',
-            description: 'A new Homegames game'
+            description: 'Tracks players and gives each their own color'
         };
     }
 
     constructor() {
         super();
         this.players = {};
+
         this.base = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
             coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
@@ -246,33 +311,35 @@ class MyGame extends Game {
                 const dot = new GameNode.Shape({
                     shapeType: Shapes.POLYGON,
                     coordinates2d: ShapeUtils.rectangle(x - 2, y - 2, 4, 4),
-                    fill: player.color,
-                    playerIds: [playerId]
+                    fill: player.color
                 });
                 this.base.addChild(dot);
             }
         });
 
-        this.playerListNode = new GameNode.Shape({
+        // Holds the roster of player badges/labels.
+        this.rosterNode = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
             coordinates2d: ShapeUtils.rectangle(0, 0, 0, 0)
         });
-        this.base.addChild(this.playerListNode);
+        this.base.addChild(this.rosterNode);
     }
 
     handleNewPlayer({ playerId, info }) {
-        const color = Colors.randomColor();
-        this.players[playerId] = { info, color };
-        this.renderPlayerList();
+        this.players[playerId] = {
+            color: Colors.randomColor(),
+            name: (info && info.name) || ('Player ' + playerId)
+        };
+        this.renderRoster();
     }
 
     handlePlayerDisconnect(playerId) {
         delete this.players[playerId];
-        this.renderPlayerList();
+        this.renderRoster();
     }
 
-    renderPlayerList() {
-        this.playerListNode.clearChildren();
+    renderRoster() {
+        this.rosterNode.clearChildren();
         let y = 2;
         for (const id in this.players) {
             const p = this.players[id];
@@ -283,12 +350,27 @@ class MyGame extends Game {
             });
             const label = new GameNode.Text({
                 textInfo: {
-                    text: p.info?.name || ('Player ' + id),
-                    x: 7, y: y + 0.5,
-                    size: 1.2, color: COLORS.BLACK, align: 'left'
+                    text: p.name,
+                    x: 7,
+                    y: y + 0.5,
+                    size: 1.2,
+                    align: 'left',
+                    color: COLORS.BLACK
                 }
             });
-            this.playerListNode.addChildren(badge, label);
+            // Only the player it belongs to sees the "(you)" marker.
+            const youMarker = new GameNode.Text({
+                textInfo: {
+                    text: '(you)',
+                    x: 20,
+                    y: y + 0.5,
+                    size: 1.2,
+                    align: 'left',
+                    color: p.color
+                },
+                playerIds: [Number(id)]
+            });
+            this.rosterNode.addChildren(badge, label, youMarker);
             y += 5;
         }
     }
@@ -302,93 +384,375 @@ module.exports = MyGame;
 `
         }
     },
-    'assets': {
-        label: 'Asset Game',
-        description: 'A game that demonstrates image assets. Click to move the image.',
+    'text-input': {
+        label: "Text Input",
+        description: "Type into a box and show the text on screen.",
         files: {
-            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-1010');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
 const COLORS = Colors.COLORS;
 
+// Click the blue box and type — your text shows on screen. Demonstrates
+// text rendering and a text input field (input: { type: 'text' }).
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '1010',
+            squishVersion: '138',
             author: 'Unknown',
-            description: 'A game with image assets'
+            description: 'Type into a box and display the text'
         };
     }
 
     constructor() {
         super();
-        this.imagePos = { x: 40, y: 30 };
-        this.imageSize = { x: 20, y: 20 };
-
         this.base = new GameNode.Shape({
             shapeType: Shapes.POLYGON,
             coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
-            fill: COLORS.WHITE,
-            onClick: (playerId, x, y) => {
-                this.imagePos = { x: x - this.imageSize.x / 2, y: y - this.imageSize.y / 2 };
-                this.updateImage();
+            fill: COLORS.WHITE
+        });
+
+        this.label = new GameNode.Text({
+            textInfo: {
+                text: 'Click the box and type',
+                x: 50,
+                y: 60,
+                size: 3,
+                align: 'center',
+                color: COLORS.BLACK
             }
         });
 
-        this.imageNode = new GameNode.Asset({
-            coordinates2d: ShapeUtils.rectangle(this.imagePos.x, this.imagePos.y, this.imageSize.x, this.imageSize.y),
-            assetInfo: {
-                'myImage': {
-                    pos: { ...this.imagePos },
-                    size: { ...this.imageSize }
+        this.inputBox = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(35, 20, 30, 15),
+            fill: COLORS.HG_BLUE,
+            input: {
+                type: 'text',
+                oninput: (playerId, text) => {
+                    const newText = this.label.node.text;
+                    newText.text = text && text.length ? text : 'Click the box and type';
+                    this.label.node.textInfo = newText;
+                    this.label.node.onStateChange();
                 }
             }
         });
 
-        this.base.addChild(this.imageNode);
-
-        this.label = new GameNode.Text({
-            textInfo: {
-                text: 'Click anywhere to move the image',
-                x: 50, y: 5,
-                size: 1.5, color: COLORS.BLACK, align: 'center'
-            }
-        });
-
         this.base.addChild(this.label);
+        this.base.addChild(this.inputBox);
     }
 
-    updateImage() {
-        this.imageNode.node.coordinates2d = ShapeUtils.rectangle(
-            this.imagePos.x, this.imagePos.y, this.imageSize.x, this.imageSize.y
-        );
-        const newAsset = this.imageNode.node.asset;
-        newAsset.myImage.pos = { ...this.imagePos };
-        newAsset.myImage.size = { ...this.imageSize };
-        this.imageNode.node.asset = newAsset;
+    handleNewPlayer({ playerId }) {
     }
 
-    handleNewPlayer({ playerId }) {}
-    handlePlayerDisconnect(playerId) {}
+    handlePlayerDisconnect(playerId) {
+    }
 
     getLayers() {
         return [{ root: this.base }];
-    }
-
-    getAssets() {
-        return {
-            'myImage': new Asset({
-                id: '1715f020b60ee74c53a1d8a311ce2622',
-                type: 'image'
-            })
-        };
     }
 }
 
 module.exports = MyGame;
 `
         }
+    },
+    'image': {
+        label: "Image Upload",
+        description: "Upload an image from your device and display it.",
+        files: {
+            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+const COLORS = Colors.COLORS;
+
+// Click the box to upload an image from your device, then it's drawn on
+// screen. Demonstrates user-uploaded image assets via input: { type: 'file' }
+// together with the addAsset() callback and getAssets().
+class MyGame extends Game {
+    constructor({ addAsset }) {
+        super();
+        this.addAsset = addAsset;
+        // Holds assets the player uploads at runtime.
+        this.assets = {};
+        this.uploadCount = 0;
+        this.imageNode = null;
+
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE
+        });
+
+        this.label = new GameNode.Text({
+            textInfo: {
+                text: 'Click the box to upload an image',
+                x: 50,
+                y: 12,
+                size: 2.5,
+                align: 'center',
+                color: COLORS.BLACK
+            }
+        });
+
+        this.uploadButton = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(40, 20, 20, 12),
+            fill: COLORS.HG_BLUE,
+            input: {
+                type: 'file',
+                oninput: (playerId, data) => {
+                    const key = 'upload' + (++this.uploadCount);
+                    // The second arg is the raw uploaded file data.
+                    this.assets[key] = new Asset({ id: key, type: 'image' }, data);
+                    // Register the asset, then draw it once it's available.
+                    this.addAsset(key, this.assets[key]).then(() => {
+                        if (this.imageNode) {
+                            this.base.removeChild(this.imageNode.node.id);
+                        }
+                        this.imageNode = new GameNode.Asset({
+                            coordinates2d: ShapeUtils.rectangle(30, 40, 40, 50),
+                            assetInfo: {
+                                [key]: {
+                                    pos: { x: 30, y: 40 },
+                                    size: { x: 40, y: 50 }
+                                }
+                            }
+                        });
+                        this.base.addChild(this.imageNode);
+                    });
+                }
+            }
+        });
+
+        this.base.addChild(this.label);
+        this.base.addChild(this.uploadButton);
     }
+
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '138',
+            author: 'Unknown',
+            description: 'Upload an image and display it'
+        };
+    }
+
+    handleNewPlayer({ playerId }) {
+    }
+
+    handlePlayerDisconnect(playerId) {
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+
+    getAssets() {
+        return this.assets;
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'animation': {
+        label: "Animation",
+        description: "A bouncing, color-cycling square driven by a tick loop.",
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+const COLORS = Colors.COLORS;
+
+// A square bounces around the screen and pulses through colors every tick.
+// Demonstrates a tick loop driving animation and onStateChange().
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '138',
+            author: 'Unknown',
+            description: 'A bouncing, color-cycling square',
+            tickRate: 60
+        };
+    }
+
+    constructor() {
+        super();
+        this.size = 12;
+        this.pos = { x: 20, y: 20 };
+        this.vel = { x: 0.8, y: 0.6 };
+        this.hue = 0;
+
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE
+        });
+
+        this.mover = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(this.pos.x, this.pos.y, this.size, this.size),
+            fill: Colors.randomColor()
+        });
+        this.base.addChild(this.mover);
+    }
+
+    tick() {
+        this.pos.x += this.vel.x;
+        this.pos.y += this.vel.y;
+
+        if (this.pos.x <= 0 || this.pos.x >= 100 - this.size) {
+            this.vel.x *= -1;
+            this.pos.x = Math.max(0, Math.min(100 - this.size, this.pos.x));
+        }
+        if (this.pos.y <= 0 || this.pos.y >= 100 - this.size) {
+            this.vel.y *= -1;
+            this.pos.y = Math.max(0, Math.min(100 - this.size, this.pos.y));
+        }
+
+        // Cycle the color smoothly through red/green/blue.
+        this.hue = (this.hue + 2) % 360;
+        const t = this.hue / 60;
+        const r = Math.round(127 + 127 * Math.sin(t));
+        const g = Math.round(127 + 127 * Math.sin(t + 2));
+        const b = Math.round(127 + 127 * Math.sin(t + 4));
+
+        this.mover.node.coordinates2d = ShapeUtils.rectangle(this.pos.x, this.pos.y, this.size, this.size);
+        this.mover.node.fill = [r, g, b, 255];
+        this.mover.node.onStateChange();
+    }
+
+    handleNewPlayer({ playerId }) {
+    }
+
+    handlePlayerDisconnect(playerId) {
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'scroll': {
+        label: "Scrolling World",
+        description: "Pan a camera around a world larger than the screen.",
+        files: {
+            'index.js': `const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils } = require('squish-138');
+const COLORS = Colors.COLORS;
+
+// A world larger than the screen; each player pans their own camera with
+// WASD. Demonstrates ViewableGame, a world plane, and per-player views.
+class MyGame extends ViewableGame {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '138',
+            author: 'Unknown',
+            description: 'Scroll a camera around a large world with WASD',
+            tickRate: 60
+        };
+    }
+
+    constructor() {
+        // The world is 200x200; each player sees a 100x100 window into it.
+        super(200);
+        this.worldSize = 200;
+        this.viewSize = 100;
+        this.step = 2;
+        this.playerViews = {};
+
+        const worldBase = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, this.worldSize, this.worldSize),
+            fill: COLORS.WHITE
+        });
+
+        // Scatter some landmarks so movement is visible.
+        const colors = [COLORS.RED, COLORS.BLUE, COLORS.GREEN, COLORS.PURPLE, COLORS.HG_YELLOW];
+        let i = 0;
+        for (let x = 10; x < this.worldSize; x += 50) {
+            for (let y = 10; y < this.worldSize; y += 50) {
+                worldBase.addChild(new GameNode.Shape({
+                    shapeType: Shapes.POLYGON,
+                    coordinates2d: ShapeUtils.rectangle(x, y, 20, 20),
+                    fill: colors[(i++) % colors.length]
+                }));
+            }
+        }
+
+        this.getPlane().addChild(worldBase);
+    }
+
+    handleNewPlayer({ playerId }) {
+        const view = { x: 0, y: 0, w: this.viewSize, h: this.viewSize };
+
+        // A stable per-player root that holds the current view slice.
+        const viewRoot = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, this.viewSize, this.viewSize),
+            fill: COLORS.WHITE,
+            playerIds: [playerId]
+        });
+
+        const slice = ViewUtils.getView(this.getPlane(), view, [playerId]);
+        slice.node.playerIds = [playerId];
+        viewRoot.addChild(slice);
+
+        this.playerViews[playerId] = { view, viewRoot };
+        this.getViewRoot().addChild(viewRoot);
+    }
+
+    handleKeyDown(playerId, key) {
+        const pv = this.playerViews[playerId];
+        if (!pv) return;
+
+        const view = Object.assign({}, pv.view);
+        if (key === 'w' || key === 'ArrowUp') view.y = Math.max(0, view.y - this.step);
+        if (key === 's' || key === 'ArrowDown') view.y = Math.min(this.worldSize - view.h, view.y + this.step);
+        if (key === 'a' || key === 'ArrowLeft') view.x = Math.max(0, view.x - this.step);
+        if (key === 'd' || key === 'ArrowRight') view.x = Math.min(this.worldSize - view.w, view.x + this.step);
+
+        const slice = ViewUtils.getView(this.getPlane(), view, [playerId]);
+        pv.view = view;
+        pv.viewRoot.node.clearChildren();
+        pv.viewRoot.node.addChild(slice);
+        pv.viewRoot.node.onStateChange();
+    }
+
+    handlePlayerDisconnect(playerId) {
+        const pv = this.playerViews[playerId];
+        if (pv && pv.viewRoot) {
+            this.getViewRoot().removeChild(pv.viewRoot.node.id);
+        }
+        delete this.playerViews[playerId];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
 };
+
+// Normalize source so trivial whitespace/line-ending differences don't matter
+// when comparing against the unmodified starter templates.
+const normalizeSource = (s) => (s || '').replace(/\r\n/g, '\n').trim();
+
+// Pre-computed set of every template's index.js, normalized, so we can cheaply
+// detect a game whose code is still byte-identical to a starter template.
+const STARTER_INDEX_SOURCES = new Set(
+    Object.values(GAME_TEMPLATES)
+        .map(t => t.files && t.files['index.js'])
+        .filter(Boolean)
+        .map(normalizeSource)
+);
+
+// True if the given index.js content is unchanged from one of the starter
+// templates. Used to require at least one edit before a game can be published.
+const isUnmodifiedStarterTemplate = (source) =>
+    STARTER_INDEX_SOURCES.has(normalizeSource(source));
 
 // ---------------------------------------------------------------------------
 // Game creation (with Forgejo repo)
@@ -1235,6 +1599,25 @@ const handleSubmitPublishRequest = (req, res, userId, gameId) => {
                 return;
             }
 
+            const [owner, repo] = game.forgejoRepo.split('/');
+
+            // Require at least one change from the starter template before
+            // publishing — keeps blank/unmodified starter games out of the catalog.
+            getFileContents(owner, repo, 'index.js', commitSha).then(fileData => {
+                const source = Buffer.from(fileData.content, 'base64').toString('utf8');
+                if (isUnmodifiedStarterTemplate(source)) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'This game is still the unmodified starter template. Make at least one change before publishing.' }));
+                    return;
+                }
+                proceed();
+            }).catch(err => {
+                console.error('Failed to read index.js for template check', err);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Could not read index.js for this version' }));
+            });
+
+            function proceed() {
             getMongoCollection('publishRequests').then(collection => {
                 // Rate limit: 1 publish request per 10 minutes per user
                 const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
@@ -1332,6 +1715,7 @@ const handleSubmitPublishRequest = (req, res, userId, gameId) => {
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: 'Database error' }));
             });
+            } // end proceed()
         }).catch(err => {
             res.writeHead(404);
             res.end(JSON.stringify({ error: 'Game not found' }));
