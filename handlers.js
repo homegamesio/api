@@ -1213,15 +1213,19 @@ const requireAdmin = (userId, res, fn) => {
     });
 };
 
-// Shared list responder: parses ?search/&page/&limit and runs a list fn.
+// Shared list responder: parses ?search/&page/&limit/&sort/&order and runs a list fn.
 const adminListResponder = (req, res, listFn) => {
-    const { search, page, limit } = url.parse(req.url, true).query;
+    const { search, page, limit, sort, order } = url.parse(req.url, true).query;
     const lim = Math.min(Number(limit) || 25, 100);
     const pg = Math.max(Number(page) || 1, 1);
     const offset = (pg - 1) * lim;
-    listFn(search, lim, offset).then(({ items, count }) => {
+    // Only allow sorting by a simple field name; default to newest-first.
+    const sortField = (sort && /^[a-zA-Z0-9_.]+$/.test(sort)) ? sort : 'created';
+    const sortDir = order === 'asc' ? 1 : -1;
+    const sortSpec = { [sortField]: sortDir };
+    listFn(search, lim, offset, sortSpec).then(({ items, count }) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ items, count, page: pg, limit: lim }));
+        res.end(JSON.stringify({ items, count, page: pg, limit: lim, sort: sortField, order: sortDir === 1 ? 'asc' : 'desc' }));
     }).catch(err => {
         console.error('admin list failed', err);
         res.writeHead(500, { 'Content-Type': 'application/json' });

@@ -747,11 +747,11 @@ const deleteDeveloper = (userId) => new Promise((resolve, reject) => {
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const adminPaginatedList = (collectionName, query, projection, limit, offset) => new Promise((resolve, reject) => {
+const adminPaginatedList = (collectionName, query, projection, limit, offset, sort) => new Promise((resolve, reject) => {
     getMongoCollection(collectionName).then(collection => {
         collection.countDocuments(query).then(count => {
             collection.find(query, projection ? { projection } : undefined)
-                .sort({ created: -1 })
+                .sort(sort || { created: -1 })
                 .skip(Number(offset) || 0)
                 .limit(Number(limit) || 25)
                 .toArray()
@@ -761,32 +761,32 @@ const adminPaginatedList = (collectionName, query, projection, limit, offset) =>
     }).catch(reject);
 });
 
-const adminListUsers = (search, limit, offset) => {
+const adminListUsers = (search, limit, offset, sort) => {
     let query = {};
     if (search) {
         const rx = { $regex: escapeRegex(search), $options: 'i' };
         query = { $or: [{ displayName: rx }, { email: rx }, { userId: search }] };
     }
     // Never expose password/verification secrets to the admin UI.
-    return adminPaginatedList('users', query, { passwordHash: 0, passwordSalt: 0, verificationCodeHash: 0 }, limit, offset);
+    return adminPaginatedList('users', query, { passwordHash: 0, passwordSalt: 0, verificationCodeHash: 0 }, limit, offset, sort);
 };
 
-const adminListGames = (search, limit, offset) => {
+const adminListGames = (search, limit, offset, sort) => {
     let query = {};
     if (search) {
         const rx = { $regex: escapeRegex(search), $options: 'i' };
         query = { $or: [{ name: rx }, { gameId: search }, { developerId: search }] };
     }
-    return adminPaginatedList('games', query, null, limit, offset);
+    return adminPaginatedList('games', query, null, limit, offset, sort);
 };
 
-const adminListAllAssets = (search, limit, offset) => {
+const adminListAllAssets = (search, limit, offset, sort) => {
     let query = {};
     if (search) {
         const rx = { $regex: escapeRegex(search), $options: 'i' };
         query = { $or: [{ name: rx }, { assetId: search }, { developerId: search }] };
     }
-    return adminPaginatedList('assets', query, null, limit, offset);
+    return adminPaginatedList('assets', query, null, limit, offset, sort);
 };
 
 const adminGetStats = () => Promise.all([
