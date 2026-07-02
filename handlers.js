@@ -5,6 +5,10 @@ const { v4: uuidv4 } = require('uuid');
 const { Binary } = require('mongodb');
 
 const { MAX_SIZE, CERT_DOMAIN } = require('./config');
+const assetCache = require('./asset-cache');
+
+// Asset bytes are immutable per id, so cached copies can live a long time.
+const ASSET_CACHE_MAX_AGE = 31536000; // 1 year
 
 // ---------------------------------------------------------------------------
 // Rate limiters
@@ -54,7 +58,8 @@ const getClientIP = (req) => {
 
 const assetUploadLimiter = rateLimit('asset-upload', 60 * 1000, 5);     // 5 uploads per minute per IP
 const signupLimiter = rateLimit('signup', 24 * 60 * 60 * 1000, 1);       // 1 signup per 24 hours per IP
-const sessionCreateLimiter = rateLimit('session-create', 60 * 1000, 1);  // 1 session per minute per IP
+const SESSION_CREATE_WINDOW_MS = 30 * 1000;
+const sessionCreateLimiter = rateLimit('session-create', SESSION_CREATE_WINDOW_MS, 1);  // 1 session per 30s per IP
 const certRequestLimiter = rateLimit('cert-request', 60 * 60 * 1000, 5); // 5 cert requests per hour per IP (each triggers a real ACME order)
 const { generateId, getHash, generateJwt } = require('./crypto');
 const { assetResponse } = require('./models');
@@ -152,6 +157,8 @@ const handleDeleteDeveloper = (req, res, userId, devId) => {
                     });
                 }).then(() => {
                     deleteDeveloper(devId).then(result => {
+                        // Drop any of this developer's images from the asset cache.
+                        assetCache.evictBy(e => e.developerId === devId);
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ deleted: true, userId: devId, gamesDeleted: result.gamesDeleted }));
                     }).catch(err => {
@@ -821,28 +828,58 @@ const handleGetCertStatus = (req, res) => {
     });
 };
 
+// Write an asset payload with caching headers, honoring conditional requests.
+const serveAssetEntry = (req, res, entry) => {
+    res.setHeader('Cache-Control', `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`);
+    res.setHeader('ETag', entry.etag);
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURI(entry.name)}"`);
+    if (entry.contentType) {
+        res.setHeader('Content-Type', entry.contentType);
+    }
+    // Client already holds this exact version — skip resending the body.
+    if (req.headers['if-none-match'] === entry.etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+    }
+    res.writeHead(200);
+    res.end(entry.buffer);
+};
+
 const handleGetAsset = (req, res, assetId) => {
+    const cached = assetCache.get(assetId);
+    if (cached) {
+        serveAssetEntry(req, res, cached);
+        return;
+    }
     getMongoAsset(assetId).then((assetData) => {
         if (!assetData) {
             res.writeHead(404);
             res.end('Asset not found');
-        } else {
-            getMongoDocument(assetId).then((documentData) => {
-                if (documentData) {
-                    const safeName = (assetData.name || 'asset').replace(/["\r\n]/g, '');
-                    const headers = { 'Content-Disposition': `inline; filename="${encodeURI(safeName)}"` };
-                    const storedContentType = assetData.metadata && assetData.metadata['Content-Type'];
-                    if (storedContentType) {
-                        headers['Content-Type'] = storedContentType;
-                    }
-                    res.writeHead(200, headers);
-                    res.end(documentData.data.buffer);
-                } else {
-                    res.writeHead(404);
-                    res.end();
-                }
-            });
+            return;
         }
+        getMongoDocument(assetId).then((documentData) => {
+            if (!documentData) {
+                res.writeHead(404);
+                res.end();
+                return;
+            }
+            const contentType = (assetData.metadata && assetData.metadata['Content-Type']) || null;
+            const entry = {
+                buffer: documentData.data.buffer,
+                contentType,
+                name: (assetData.name || 'asset').replace(/["\r\n]/g, ''),
+                etag: `"asset-${assetId}"`,
+                size: documentData.data.buffer.length,
+                developerId: assetData.developerId,
+            };
+            // Only the image hot path is cached in memory (per design); other
+            // asset types still get HTTP cache headers but always hit the DB.
+            if (contentType && contentType.startsWith('image/')) {
+                assetCache.set(assetId, entry);
+            }
+            serveAssetEntry(req, res, entry);
+        });
     }).catch(err => {
         res.end(JSON.stringify(err));
     });
@@ -971,10 +1008,10 @@ const handleGetGameVersionDetail = (req, res, gameId, versionId) => {
 
 const handleListAssets = (req, res, userId) => {
     const queryObject = url.parse(req.url, true).query;
-    let { limit, offset, sort, query } = queryObject;
+    let { limit, offset, sort, query, type } = queryObject;
     if (!offset) { offset = 0; }
     if (!limit || limit > 100) { limit = 10; }
-    listAssets(userId, query, limit, offset).then(_assets => {
+    listAssets(userId, query, limit, offset, type || null).then(_assets => {
         const { assets, count } = _assets;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ assets: assets.map(assetResponse), count }));
@@ -1016,6 +1053,7 @@ const handleDeleteAsset = (req, res, userId, assetId) => {
             return;
         }
         deleteAsset(asset.developerId, assetId).then((result) => {
+            assetCache.del(assetId);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result));
         }).catch(() => {
@@ -1067,6 +1105,7 @@ const handleUpdateAssetMeta = (req, res, userId, assetId) => {
                 return;
             }
             updateAsset(asset.developerId, assetId, updates).then((result) => {
+                assetCache.del(assetId);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(result));
             }).catch(() => {
@@ -1096,6 +1135,7 @@ const handleUpdateAssetTags = (req, res, userId, assetId) => {
         // Sanitize: lowercase, trim, deduplicate, limit length
         const cleanTags = [...new Set(tags.map(t => String(t).trim().toLowerCase()).filter(t => t.length > 0 && t.length <= 50))].slice(0, 20);
         updateAssetTags(userId, assetId, cleanTags).then(result => {
+            assetCache.del(assetId);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result));
         }).catch(err => {
@@ -1281,8 +1321,9 @@ const handleHealth = (req, res) => {
 const handleCreateSession = (req, res) => {
     const ip = getClientIP(req);
     if (!sessionCreateLimiter(ip)) {
-        res.writeHead(429, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Session limit: 1 per minute. Please wait.' }));
+        const retryAfter = SESSION_CREATE_WINDOW_MS / 1000;
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) });
+        res.end(JSON.stringify({ error: 'One session at a time — please wait a moment.', retryAfter }));
         return;
     }
 
@@ -1408,6 +1449,14 @@ const handleCreateSession = (req, res) => {
                         homenamesRes.on('data', (chunk) => { data += chunk; });
                         homenamesRes.on('end', () => {
                             if (homenamesRes.statusCode >= 200 && homenamesRes.statusCode < 300) {
+                                // Record a minimal session-start stat (fire-and-forget:
+                                // never block or fail the response on a stats write).
+                                getMongoCollection('sessions').then(sessions => sessions.insertOne({
+                                    gameId,
+                                    commitSha: sha,
+                                    created: Date.now(),
+                                })).catch(statErr => console.error('[sessions] stat write failed:', statErr.message));
+
                                 res.writeHead(200, { 'Content-Type': 'application/json' });
                                 res.end(data);
                             } else {

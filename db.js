@@ -298,24 +298,24 @@ const listPublicAssets = (query, limit = 10, offset = 0, assetType = null, inclu
     }).catch(reject);
 });
 
-const listAssets = (developerId, query, limit = 10, offset = 0) => new Promise((resolve, reject) => {
+const listAssets = (developerId, query, limit = 10, offset = 0, assetType = null) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(collection => {
-        let dbQuery = { developerId };
+        const filters = [{ developerId }];
+        const typeFilter = assetTypeFilter(assetType);
+        if (typeFilter) {
+            filters.push(typeFilter);
+        }
         if (query) {
-            dbQuery = {
-              '$and': [
-                { developerId },
-                {
-                  '$or': [
+            filters.push({
+                '$or': [
                     { name: { '$regex': query, $options: 'i' } },
                     { description: { '$regex': query, $options: 'i' } },
                     { assetId: { '$regex': query, $options: 'i' } },
                     { tags: { '$regex': query, $options: 'i' } },
-                  ]
-                }
-              ]
-            };
+                ],
+            });
         }
+        const dbQuery = filters.length === 1 ? filters[0] : { '$and': filters };
         collection.countDocuments(dbQuery).then((count) => {
             collection.find(dbQuery).limit(Number(limit)).skip(Number(offset)).sort({ created: -1 }).toArray().then(assets => {
                 resolve({ assets, count });
@@ -505,6 +505,7 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
+                        getMongoCollection('sessions').then(sessionCollection => sessionCollection.countDocuments({ gameId })).then(sessionCount => {
                         resolve({
                             game: {
                                 name: gameResult.name,
@@ -514,6 +515,7 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 thumbnail: gameResult.thumbnail,
                                 id: gameResult.gameId,
                                 featured: gameResult.featured || false,
+                                sessionCount,
                             },
                             versions: versions.map(v => {
                                 return {
@@ -525,6 +527,7 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 }
                             })
                         });
+                        }).catch(reject);
                     }).catch(reject);
                 }).catch(reject);
             }
@@ -612,8 +615,12 @@ const updateMongoProfileInfo = (userId, { description, image, btcAddress }) => n
                 reject('User not found');
             } else {
                 const updates = {};
-                if (description && foundUser.description != description) {
-                    updates.description = description;
+                if (description !== undefined) {
+                    // Profile descriptions are capped at 200 characters.
+                    const trimmed = String(description).slice(0, 200);
+                    if (foundUser.description != trimmed) {
+                        updates.description = trimmed;
+                    }
                 }
                 if (image !== undefined && foundUser.image != image) {
                     updates.image = image || null;
