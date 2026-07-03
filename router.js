@@ -58,8 +58,6 @@ const certStatusRegex = '/cert-status';
 const assetsRegex = '/assets/(\\S*)';
 
 const createSessionRegex = '/sessions';
-const listServersRegex = '/servers';
-const serverSessionsRegex = '/servers/(\\S*)/sessions';
 const publishedVersionsRegex = '/games/(\\S*)/published-versions';
 const gameSourceTreeRegex = '/games/(\\S*)/source-tree';
 const gameSourceFileRegex = '/games/(\\S*)/source';
@@ -217,8 +215,6 @@ const buildRequestHandlers = (h, s) => ({
         [gameSourceTreeRegex]: { handle: h.handleGetGameSourceTree },
         [gameSourceFileRegex]: { handle: h.handleGetGameSourceFile },
         [publishedVersionsRegex]: { handle: h.handleGetPublishedVersions },
-        [serverSessionsRegex]: { handle: h.handleListServerSessions },
-        [listServersRegex]: { handle: h.handleListServers },
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },
         [gameVersionDetailRegex]: { handle: h.handleGetGameVersionDetail },

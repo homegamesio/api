@@ -47,27 +47,6 @@ const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
 const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
-// Registry of known Homegames-core / Homenames servers the platform can route
-// game sessions to. Each entry: { id, name, url }. The `url` is server-side
-// only — it is never exposed to the browser; clients reference servers by `id`,
-// and the API is the sole thing that dials these URLs (SSRF allow-list).
-//
-// Configured via HOMENAMES_SERVERS as a JSON array. If unset (or unparseable),
-// we synthesize a single "default" entry from HOMENAMES_URL so existing
-// single-server deployments keep working unchanged.
-let HOMENAMES_SERVERS;
-try {
-    HOMENAMES_SERVERS = process.env.HOMENAMES_SERVERS
-        ? JSON.parse(process.env.HOMENAMES_SERVERS)
-        : null;
-} catch (e) {
-    console.error('Failed to parse HOMENAMES_SERVERS, falling back to HOMENAMES_URL:', e.message);
-    HOMENAMES_SERVERS = null;
-}
-if (!Array.isArray(HOMENAMES_SERVERS) || HOMENAMES_SERVERS.length === 0) {
-    HOMENAMES_SERVERS = [{ id: 'default', name: 'Default server', url: HOMENAMES_URL }];
-}
-
 // Public URL of the website (homegamesio) — used to build links in emails and
 // to redirect to after email verification.
 const WEB_PUBLIC_URL = process.env.WEB_PUBLIC_URL || 'http://localhost:80';
@@ -106,7 +85,6 @@ module.exports = {
     FORGEJO_WEBHOOK_SECRET,
     API_PUBLIC_URL,
     HOMENAMES_URL,
-    HOMENAMES_SERVERS,
     WEB_PUBLIC_URL,
     SES_REGION,
     SES_FROM_ADDRESS,
