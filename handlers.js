@@ -4,7 +4,7 @@ const multiparty = require('multiparty');
 const { v4: uuidv4 } = require('uuid');
 const { Binary } = require('mongodb');
 
-const { MAX_SIZE, CERT_DOMAIN } = require('./config');
+const { MAX_SIZE, CERT_DOMAIN, HOMENAMES_SERVERS } = require('./config');
 const assetCache = require('./asset-cache');
 
 // Asset bytes are immutable per id, so cached copies can live a long time.
@@ -1315,6 +1315,133 @@ const handleHealth = (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// Homenames / homegames-core server registry
+//
+// Servers are configured server-side (HOMENAMES_SERVERS). The `url` is never
+// exposed to clients — they reference a server by `id`, and only the API dials
+// these URLs. This keeps the session-create proxy from becoming an open SSRF.
+// ---------------------------------------------------------------------------
+
+// Resolve a configured server by id. Omitted id → the first (default) server.
+const getServerById = (serverId) => {
+    if (!serverId) return HOMENAMES_SERVERS[0];
+    return HOMENAMES_SERVERS.find(s => s.id === serverId) || null;
+};
+
+// Make an HTTP(S) request to a Homenames server, picking the right protocol
+// and default port from its configured url. Resolves { statusCode, body }.
+const homenamesRequest = (server, { method, path, body }) => new Promise((resolve, reject) => {
+    const u = new URL(server.url);
+    const isHttps = u.protocol === 'https:';
+    const lib = isHttps ? require('https') : require('http');
+    const payload = body ? JSON.stringify(body) : null;
+    const req = lib.request({
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path,
+        method,
+        headers: payload
+            ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+            : {},
+    }, (resp) => {
+        let data = '';
+        resp.on('data', chunk => { data += chunk; });
+        resp.on('end', () => resolve({ statusCode: resp.statusCode, body: data }));
+    });
+    req.setTimeout(5000, () => req.destroy(new Error('Homenames request timed out')));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+});
+
+// Server /info responses are cached briefly so listing servers doesn't probe
+// every backend on each page load.
+const _serverInfoCache = new Map(); // id -> { info, fetchedAt }
+const SERVER_INFO_TTL_MS = 30 * 1000;
+
+const fetchServerInfo = (server) => {
+    const cached = _serverInfoCache.get(server.id);
+    if (cached && (Date.now() - cached.fetchedAt) < SERVER_INFO_TTL_MS) {
+        return Promise.resolve(cached.info);
+    }
+    return homenamesRequest(server, { method: 'GET', path: '/info' }).then(({ statusCode, body }) => {
+        if (statusCode < 200 || statusCode >= 300) throw new Error('info status ' + statusCode);
+        const info = JSON.parse(body);
+        _serverInfoCache.set(server.id, { info, fetchedAt: Date.now() });
+        return info;
+    });
+};
+
+// Ensure a session has a browser-usable WebSocket URL. Prefer what the server
+// reports; otherwise reconstruct it from the server's configured url (this used
+// to live in the browser — it belongs here, where we know the url).
+const buildWsUrl = (server, session) => {
+    if (session.wsUrl) return session.wsUrl;
+    if (session.port == null) return undefined;
+    const u = new URL(server.url);
+    const host = u.hostname;
+    return u.protocol === 'https:'
+        ? `wss://${host}/session/${session.port}`
+        : `ws://${host}:${session.port}`;
+};
+
+// GET /servers — list configured servers with live name/version. `url` is
+// intentionally omitted so it never reaches the browser.
+const handleListServers = (req, res) => {
+    Promise.all(HOMENAMES_SERVERS.map(server =>
+        fetchServerInfo(server).then(info => ({
+            id: server.id,
+            name: info.name || server.name,
+            coreVersion: info.coreVersion || null,
+            online: true,
+        })).catch(() => ({
+            id: server.id,
+            name: server.name,
+            coreVersion: null,
+            online: false,
+        }))
+    )).then(servers => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ servers }));
+    });
+};
+
+// GET /servers/:serverId/sessions?gameId=... — proxy the server's session list
+// through the API so the browser never talks to Homenames directly.
+const handleListServerSessions = (req, res, serverId) => {
+    const server = getServerById(serverId);
+    if (!server) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unknown server' }));
+        return;
+    }
+    const { gameId } = url.parse(req.url, true).query;
+    homenamesRequest(server, { method: 'GET', path: '/sessions' }).then(({ statusCode, body }) => {
+        if (statusCode < 200 || statusCode >= 300) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Game server returned ' + statusCode }));
+            return;
+        }
+        let parsed;
+        try { parsed = JSON.parse(body); } catch (e) { parsed = {}; }
+        let sessions = parsed.sessions || [];
+        if (gameId) sessions = sessions.filter(s => s.gameId === gameId);
+        sessions = sessions.map(s => ({
+            id: s.id,
+            gameId: s.gameId,
+            playerCount: s.playerCount || 0,
+            port: s.port,
+            wsUrl: buildWsUrl(server, s),
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sessions }));
+    }).catch(() => {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to reach game server' }));
+    });
+};
+
+// ---------------------------------------------------------------------------
 // Game Sessions — create a session on homegames-core via Homenames
 // ---------------------------------------------------------------------------
 
@@ -1327,12 +1454,10 @@ const handleCreateSession = (req, res) => {
         return;
     }
 
-    const http = require('http');
     const fs = require('fs');
     const os = require('os');
     const path = require('path');
     const { pipeline } = require('stream');
-    const { HOMENAMES_URL } = require('./config');
     const { downloadArchive } = require('./forgejo');
 
     getReqBody(req, (_body, err) => {
@@ -1349,10 +1474,19 @@ const handleCreateSession = (req, res) => {
             return;
         }
 
-        const { gameId, commitSha } = body;
+        const { gameId, commitSha, serverId } = body;
         if (!gameId) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'gameId is required' }));
+            return;
+        }
+
+        // Resolve the target server from the configured allow-list. The browser
+        // sends an id, never a url — the API is the only thing that dials these.
+        const server = getServerById(serverId);
+        if (!server) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unknown server' }));
             return;
         }
 
@@ -1427,17 +1561,20 @@ const handleCreateSession = (req, res) => {
 
                     console.log(`[sessions] Game extracted to ${gamePath}, calling Homenames`);
 
-                    // Call Homenames POST /sessions
-                    const homenamesUrl = new URL(HOMENAMES_URL);
+                    // Call Homenames POST /sessions on the resolved server,
+                    // picking protocol/port from its configured url.
+                    const homenamesUrl = new URL(server.url);
+                    const isHttps = homenamesUrl.protocol === 'https:';
+                    const lib = isHttps ? require('https') : require('http');
                     const postBody = JSON.stringify({
                         gamePath: path.join(gamePath, 'index.js'),
                         gameId,
                         gameKey: game.name || gameId,
                     });
 
-                    const homenamesReq = http.request({
+                    const homenamesReq = lib.request({
                         hostname: homenamesUrl.hostname,
-                        port: homenamesUrl.port,
+                        port: homenamesUrl.port || (isHttps ? 443 : 80),
                         path: '/sessions',
                         method: 'POST',
                         headers: {
@@ -1454,11 +1591,21 @@ const handleCreateSession = (req, res) => {
                                 getMongoCollection('sessions').then(sessions => sessions.insertOne({
                                     gameId,
                                     commitSha: sha,
+                                    serverId: server.id,
                                     created: Date.now(),
                                 })).catch(statErr => console.error('[sessions] stat write failed:', statErr.message));
 
+                                // Guarantee the browser gets a usable wsUrl without
+                                // needing to know anything about the server itself.
+                                let out = data;
+                                try {
+                                    const parsed = JSON.parse(data);
+                                    parsed.wsUrl = buildWsUrl(server, parsed);
+                                    out = JSON.stringify(parsed);
+                                } catch (e) { /* pass through raw on parse failure */ }
+
                                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                                res.end(data);
+                                res.end(out);
                             } else {
                                 console.error('[sessions] Homenames error:', data);
                                 res.writeHead(homenamesRes.statusCode || 500);
@@ -1544,6 +1691,7 @@ module.exports = {
     handleAdminListUsers, handleAdminListGames, handleAdminListAssets,
     handleAdminStats, handleAdminSetAssetNsfw,
     handleCreateSession, handleGetPublishedVersions,
+    handleListServers, handleListServerSessions,
     handleRefreshToken, handleUpdateAssetTags, handleUpdateAssetMeta,
     handleListPublicAssets,
     handleGetGameSourceTree, handleGetGameSourceFile,
