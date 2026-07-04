@@ -1328,12 +1328,7 @@ const handleCreateSession = (req, res) => {
     }
 
     const http = require('http');
-    const fs = require('fs');
-    const os = require('os');
-    const path = require('path');
-    const { pipeline } = require('stream');
     const { HOMENAMES_URL } = require('./config');
-    const { downloadArchive } = require('./forgejo');
 
     getReqBody(req, (_body, err) => {
         if (err) {
@@ -1364,9 +1359,12 @@ const handleCreateSession = (req, res) => {
                 return;
             }
 
-            // If no commitSha given, find the latest published version
+            // If no commitSha given, find the latest published version.
+            // If one is given, it must be a published commit — Homenames fetches
+            // source through the public catalog endpoints, which only serve
+            // published commits.
             const findCommit = commitSha
-                ? Promise.resolve(commitSha)
+                ? verifyPublishedCommit(gameId, commitSha).then(() => commitSha)
                 : new Promise((resolve, reject) => {
                     getMongoCollection('gameVersions').then(collection => {
                         collection.find({ gameId, published: true })
@@ -1384,105 +1382,59 @@ const handleCreateSession = (req, res) => {
                 });
 
             findCommit.then(sha => {
-                const [owner, repo] = game.forgejoRepo.split('/');
+                console.log(`[sessions] Requesting session for ${gameId}@${sha.substring(0, 7)} from Homenames`);
 
-                console.log(`[sessions] Downloading archive for ${owner}/${repo}@${sha.substring(0, 7)}`);
-
-                // Download the archive from Forgejo
-                downloadArchive(owner, repo, sha).then(archiveBuf => {
-                    const tar = require('tar');
-                    const { Readable } = require('stream');
-
-                    // Extract archive to temp directory
-                    const tmpDir = path.join(os.tmpdir(), `hg-game-${gameId}-${sha.substring(0, 7)}-${Date.now()}`);
-                    fs.mkdirSync(tmpDir, { recursive: true });
-
-                    const bufStream = new Readable();
-                    bufStream.push(archiveBuf);
-                    bufStream.push(null);
-
-                    bufStream.pipe(tar.x({ cwd: tmpDir }))
-                        .on('error', (extractErr) => {
-                            console.error('[sessions] Failed to extract archive:', extractErr.message);
-                            res.writeHead(500);
-                            res.end(JSON.stringify({ error: 'Failed to extract game archive' }));
-                        })
-                        .on('finish', () => {
-
-                    // Find the extracted directory (Forgejo wraps in a subdir like "reponame")
-                    const entries = fs.readdirSync(tmpDir).filter(e => {
-                        return fs.statSync(path.join(tmpDir, e)).isDirectory();
-                    });
-
-                    const gamePath = entries.length > 0
-                        ? path.join(tmpDir, entries[0])
-                        : tmpDir;
-
-                    // Verify index.js exists
-                    if (!fs.existsSync(path.join(gamePath, 'index.js'))) {
-                        res.writeHead(400);
-                        res.end(JSON.stringify({ error: 'Game archive does not contain index.js' }));
-                        return;
-                    }
-
-                    console.log(`[sessions] Game extracted to ${gamePath}, calling Homenames`);
-
-                    // Call Homenames POST /sessions
-                    const homenamesUrl = new URL(HOMENAMES_URL);
-                    const postBody = JSON.stringify({
-                        gamePath: path.join(gamePath, 'index.js'),
-                        gameId,
-                        gameKey: game.name || gameId,
-                    });
-
-                    const homenamesReq = http.request({
-                        hostname: homenamesUrl.hostname,
-                        port: homenamesUrl.port,
-                        path: '/sessions',
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Content-Length': Buffer.byteLength(postBody),
-                        },
-                    }, (homenamesRes) => {
-                        let data = '';
-                        homenamesRes.on('data', (chunk) => { data += chunk; });
-                        homenamesRes.on('end', () => {
-                            if (homenamesRes.statusCode >= 200 && homenamesRes.statusCode < 300) {
-                                // Record a minimal session-start stat (fire-and-forget:
-                                // never block or fail the response on a stats write).
-                                getMongoCollection('sessions').then(sessions => sessions.insertOne({
-                                    gameId,
-                                    commitSha: sha,
-                                    created: Date.now(),
-                                })).catch(statErr => console.error('[sessions] stat write failed:', statErr.message));
-
-                                res.writeHead(200, { 'Content-Type': 'application/json' });
-                                res.end(data);
-                            } else {
-                                console.error('[sessions] Homenames error:', data);
-                                res.writeHead(homenamesRes.statusCode || 500);
-                                res.end(data);
-                            }
-                        });
-                    });
-
-                    homenamesReq.on('error', (e) => {
-                        console.error('[sessions] Failed to reach Homenames:', e.message);
-                        res.writeHead(502);
-                        res.end(JSON.stringify({ error: 'Failed to reach game server' }));
-                    });
-
-                    homenamesReq.write(postBody);
-                    homenamesReq.end();
-
-                    }); // end tar on('finish')
-
-                }).catch(archiveErr => {
-                    console.error('[sessions] Failed to download archive:', archiveErr);
-                    res.writeHead(500);
-                    res.end(JSON.stringify({ error: 'Failed to download game code' }));
+                // Call Homenames POST /sessions — pass the game by reference;
+                // homegames-core downloads the source itself through the public
+                // catalog endpoints (source-tree/source), so the API never has
+                // to fetch or stage game code.
+                const homenamesUrl = new URL(HOMENAMES_URL);
+                const postBody = JSON.stringify({
+                    gameId,
+                    commitSha: sha,
+                    gameKey: game.name || gameId,
                 });
+
+                const homenamesReq = http.request({
+                    hostname: homenamesUrl.hostname,
+                    port: homenamesUrl.port,
+                    path: '/sessions',
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(postBody),
+                    },
+                }, (homenamesRes) => {
+                    let data = '';
+                    homenamesRes.on('data', (chunk) => { data += chunk; });
+                    homenamesRes.on('end', () => {
+                        if (homenamesRes.statusCode >= 200 && homenamesRes.statusCode < 300) {
+                            // Record a minimal session-start stat (fire-and-forget:
+                            // never block or fail the response on a stats write).
+                            getMongoCollection('sessions').then(sessions => sessions.insertOne({
+                                gameId,
+                                commitSha: sha,
+                                created: Date.now(),
+                            })).catch(statErr => console.error('[sessions] stat write failed:', statErr.message));
+
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(data);
+                        } else {
+                            console.error('[sessions] Homenames error:', data);
+                            res.writeHead(homenamesRes.statusCode || 500);
+                            res.end(data);
+                        }
+                    });
+                });
+
+                homenamesReq.on('error', (e) => {
+                    console.error('[sessions] Failed to reach Homenames:', e.message);
+                    res.writeHead(502);
+                    res.end(JSON.stringify({ error: 'Failed to reach game server' }));
+                });
+
+                homenamesReq.write(postBody);
+                homenamesReq.end();
             }).catch(commitErr => {
                 res.writeHead(400);
                 res.end(JSON.stringify({ error: typeof commitErr === 'string' ? commitErr : 'Failed to find version' }));
