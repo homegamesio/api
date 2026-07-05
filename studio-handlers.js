@@ -107,13 +107,13 @@ const GAME_TEMPLATES = {
         label: "Blank",
         description: "An empty game with a minimal starting point.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'A new Homegames game'
         };
@@ -147,7 +147,7 @@ module.exports = MyGame;
         label: "Click",
         description: "Click anywhere to drop colored squares. Shapes, colors, and clicks.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // Click anywhere to drop a randomly colored square. Demonstrates shapes,
@@ -156,7 +156,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'Click anywhere to drop colored squares'
         };
@@ -199,7 +199,7 @@ module.exports = MyGame;
         label: "Keyboard",
         description: "Move a square with arrow keys or WASD. Input plus a tick loop.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // Move a square with the arrow keys or WASD. Demonstrates key input
@@ -208,10 +208,11 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'Move a square with the arrow keys or WASD',
-            tickRate: 60
+            // 15-30 is the sweet spot: every tick re-broadcasts the whole tree.
+            tickRate: 30
         };
     }
 
@@ -281,7 +282,7 @@ module.exports = MyGame;
         label: "Multiplayer",
         description: "Track players, give each a color, and show a live roster.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // Tracks connected players, gives each a color, and shows a live roster.
@@ -291,7 +292,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'Tracks players and gives each their own color'
         };
@@ -388,7 +389,7 @@ module.exports = MyGame;
         label: "Text Input",
         description: "Type into a box and show the text on screen.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // Click the blue box and type — your text shows on screen. Demonstrates
@@ -397,7 +398,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'Type into a box and display the text'
         };
@@ -429,9 +430,10 @@ class MyGame extends Game {
             input: {
                 type: 'text',
                 oninput: (playerId, text) => {
-                    const newText = this.label.node.text;
-                    newText.text = text && text.length ? text : 'Click the box and type';
-                    this.label.node.textInfo = newText;
+                    // The live field is node.text (textInfo is only the constructor arg).
+                    this.label.node.text = Object.assign({}, this.label.node.text, {
+                        text: text && text.length ? text : 'Click the box and type'
+                    });
                     this.label.node.onStateChange();
                 }
             }
@@ -460,7 +462,7 @@ module.exports = MyGame;
         label: "Image Upload",
         description: "Upload an image from your device and display it.",
         files: {
-            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // Click the box to upload an image from your device, then it's drawn on
@@ -529,7 +531,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'Upload an image and display it'
         };
@@ -558,7 +560,7 @@ module.exports = MyGame;
         label: "Animation",
         description: "A bouncing, color-cycling square driven by a tick loop.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-138');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // A square bounces around the screen and pulses through colors every tick.
@@ -567,10 +569,10 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
             description: 'A bouncing, color-cycling square',
-            tickRate: 60
+            tickRate: 30
         };
     }
 
@@ -578,7 +580,7 @@ class MyGame extends Game {
         super();
         this.size = 12;
         this.pos = { x: 20, y: 20 };
-        this.vel = { x: 0.8, y: 0.6 };
+        this.vel = { x: 1.2, y: 0.9 };
         this.hue = 0;
 
         this.base = new GameNode.Shape({
@@ -609,7 +611,7 @@ class MyGame extends Game {
         }
 
         // Cycle the color smoothly through red/green/blue.
-        this.hue = (this.hue + 2) % 360;
+        this.hue = (this.hue + 4) % 360;
         const t = this.hue / 60;
         const r = Math.round(127 + 127 * Math.sin(t));
         const g = Math.round(127 + 127 * Math.sin(t + 2));
@@ -639,7 +641,7 @@ module.exports = MyGame;
         label: "Scrolling World",
         description: "Pan a camera around a world larger than the screen.",
         files: {
-            'index.js': `const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils } = require('squish-138');
+            'index.js': `const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // A world larger than the screen; each player pans their own camera with
@@ -648,10 +650,9 @@ class MyGame extends ViewableGame {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '138',
+            squishVersion: '142',
             author: 'Unknown',
-            description: 'Scroll a camera around a large world with WASD',
-            tickRate: 60
+            description: 'Scroll a camera around a large world with WASD'
         };
     }
 
@@ -727,6 +728,173 @@ class MyGame extends ViewableGame {
             this.getViewRoot().removeChild(pv.viewRoot.node.id);
         }
         delete this.playerViews[playerId];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'buttons': {
+        label: "Buttons",
+        description: "Clickable buttons with labels, and showing/hiding via playerIds.",
+        files: {
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+const COLORS = Colors.COLORS;
+
+// A button is a clickable Shape with a Text label on top (Text nodes can't
+// receive clicks). Also shows hiding a node from everyone with
+// playerIds = [0] and bringing it back with [] (empty = visible to all).
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 16, y: 9 },
+            squishVersion: '142',
+            author: 'Unknown',
+            description: 'Buttons: clickable shapes with text labels'
+        };
+    }
+
+    constructor() {
+        super();
+        this.count = 0;
+
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: COLORS.WHITE
+        });
+
+        this.counterText = new GameNode.Text({
+            textInfo: { text: 'Clicks: 0', x: 50, y: 20, size: 4, align: 'center', color: COLORS.BLACK }
+        });
+        this.base.addChild(this.counterText);
+
+        this.clickButton = this.makeButton('CLICK ME', 24, 50, 24, 16, COLORS.HG_BLUE, () => {
+            this.count++;
+            this.updateUi();
+        });
+        this.resetButton = this.makeButton('RESET', 52, 50, 24, 16, COLORS.CANDY_RED, () => {
+            this.count = 0;
+            this.updateUi();
+        });
+        this.base.addChildren(this.clickButton, this.resetButton);
+
+        // Start with RESET hidden ([0] = visible to NOBODY).
+        this.setVisible(this.resetButton, false);
+    }
+
+    makeButton(label, x, y, w, h, fill, onClick) {
+        const bg = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(x, y, w, h),
+            fill,
+            onClick    // the SHAPE is what's clickable
+        });
+        bg.addChild(new GameNode.Text({
+            textInfo: { text: label, x: x + w / 2, y: y + h / 2 - 1.8, size: 2, align: 'center', color: COLORS.WHITE }
+        }));
+        return bg;
+    }
+
+    // playerIds applies per node, so set it on the button AND its label.
+    setVisible(button, visible) {
+        const ids = visible ? [] : [0];
+        button.node.playerIds = ids;
+        button.node.children.forEach(child => { child.node.playerIds = ids; });
+    }
+
+    updateUi() {
+        this.counterText.node.text = Object.assign({}, this.counterText.node.text, {
+            text: 'Clicks: ' + this.count
+        });
+        this.setVisible(this.resetButton, this.count > 0);
+        this.base.node.onStateChange();
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
+    }
+}
+
+module.exports = MyGame;
+`
+        }
+    },
+    'glow': {
+        label: "Glow & Fade",
+        description: "Neon glow with effects.shadow, and fading via color alpha.",
+        files: {
+            'index.js': `const { Game, GameNode, Shapes, ShapeUtils } = require('squish-142');
+
+// Glow comes from effects: { shadow: { color, blur } } on Shape/Asset nodes.
+// Fading uses the color field's alpha (fill alpha renders all-or-nothing).
+class MyGame extends Game {
+    static metadata() {
+        return {
+            aspectRatio: { x: 1, y: 1 },
+            squishVersion: '142',
+            author: 'Unknown',
+            description: 'Neon glow and fading shapes',
+            tickRate: 20
+        };
+    }
+
+    constructor() {
+        super();
+        this.t = 0;
+
+        // Glow reads best on a dark background.
+        this.base = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(0, 0, 100, 100),
+            fill: [10, 10, 25, 255]
+        });
+
+        const glow = (color, blur) => ({ shadow: { color, blur } });
+
+        // A steady glow.
+        this.base.addChild(new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(15, 40, 18, 18),
+            fill: [0, 255, 255, 255],
+            effects: glow([0, 255, 255, 255], 12)
+        }));
+
+        // A pulsing glow (blur animated in tick()).
+        this.pulse = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(41, 40, 18, 18),
+            fill: [255, 0, 255, 255],
+            effects: glow([255, 0, 255, 255], 10)
+        });
+        this.base.addChild(this.pulse);
+
+        // A fading shape: color alpha is what actually fades a node on screen.
+        this.ember = new GameNode.Shape({
+            shapeType: Shapes.POLYGON,
+            coordinates2d: ShapeUtils.rectangle(67, 40, 18, 18),
+            fill: [255, 150, 40, 255],
+            color: [255, 150, 40, 255]   // fade by animating THIS alpha
+        });
+        this.base.addChild(this.ember);
+    }
+
+    tick() {
+        this.t++;
+
+        // Pulse: oscillate the shadow blur.
+        this.pulse.node.effects.shadow.blur = 10 + Math.round(8 * Math.sin(this.t / 4));
+
+        // Fade out over 2 seconds, then reset.
+        const frac = 1 - (this.t % 40) / 40;
+        this.ember.node.color = [255, 150, 40, Math.round(255 * frac)];
+
+        this.base.node.onStateChange();
+    }
+
+    getLayers() {
+        return [{ root: this.base }];
     }
 }
 
@@ -1783,6 +1951,15 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
             return;
         }
 
+        // Optional mode: 'CREATE' means "write a new game from the starter
+        // template" (used by the new-game flow); absent means an edit request.
+        const mode = body.mode || undefined;
+        if (mode && mode !== 'CREATE') {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Invalid mode' }));
+            return;
+        }
+
         getGame(gameId).then(game => {
             if (!game.forgejoRepo) {
                 res.writeHead(400);
@@ -1841,6 +2018,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                     status: 'PENDING',
                                     created: Date.now(),
                                 };
+                                if (mode) record.mode = mode;
 
                                 collection.insertOne(record).then(() => {
                                     const amqp = require('amqplib/callback_api');
@@ -1894,6 +2072,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                                     prompt,
                                                     baseSha,
                                                     source: sourceContent,
+                                                    mode,
                                                 })),
                                                 { persistent: true },
                                                 (confErr) => {
