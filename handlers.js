@@ -1590,3 +1590,239 @@ function handleGetGameSourceFile(req, res, gameId) {
         res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Access denied' }));
     });
 }
+
+// ---------------------------------------------------------------------------
+// Local play — client-side single-player sessions + single-file downloads.
+// Games are single-player by default; declaring services: ['multiplayer']
+// (or another service the local runtime can't provide) opts a game out.
+// All static analysis — game code is never executed on the API.
+// ---------------------------------------------------------------------------
+
+const path = require('path');
+const localPlay = require('./local-play');
+
+// The homegames-client UMD bundle inlined into single-file downloads. In the
+// sibling-repo dev layout this default resolves automatically; deployments
+// set CLIENT_BUNDLE_PATH to wherever the built bundle lives.
+const CLIENT_BUNDLE_PATH = process.env.CLIENT_BUNDLE_PATH
+    || path.join(__dirname, '..', 'homegames-client', 'dist', 'homegames-client.js');
+
+let _clientBundleSource = null;
+const getClientBundleSource = () => {
+    if (_clientBundleSource === null) {
+        _clientBundleSource = fs.readFileSync(CLIENT_BUNDLE_PATH, 'utf8');
+    }
+    return _clientBundleSource;
+};
+
+// Both caches key on gameId:ref — content is immutable per published commit.
+const LOCAL_CACHE_MAX = 32;
+const _localContextCache = new Map();
+const _localBundleCache = new Map();
+const _capLocalCache = (map) => {
+    while (map.size > LOCAL_CACHE_MAX) map.delete(map.keys().next().value);
+};
+
+const _encodeRepoPath = (p) => p.split('/').map(encodeURIComponent).join('/');
+
+// Fetches a published version's source files from Forgejo and statically
+// extracts its metadata. Resolves { gameName, files, entryPoint, meta, playable }.
+const getLocalPlayContext = (gameId, ref) => {
+    const cacheKey = `${gameId}:${ref}`;
+    if (_localContextCache.has(cacheKey)) return _localContextCache.get(cacheKey);
+
+    const promise = verifyPublishedCommit(gameId, ref)
+        .then(() => getGame(gameId))
+        .then(game => {
+            if (!game || !game.forgejoRepo) throw 'Game has no repository';
+            const [owner, repo] = game.forgejoRepo.split('/');
+            return forgejoRequest('GET', `/repos/${owner}/${repo}/git/trees/${ref}?recursive=true`)
+                .then(tree => ({ game, owner, repo, tree }));
+        })
+        .then(({ game, owner, repo, tree }) => {
+            const jsFiles = (tree.tree || []).filter(e => e.type === 'blob' && e.path.endsWith('.js'));
+            const indexFiles = jsFiles
+                .filter(e => e.path === 'index.js' || e.path.endsWith('/index.js'))
+                .sort((a, b) => a.path.split('/').length - b.path.split('/').length);
+            if (!indexFiles.length) throw 'No index.js found in version';
+
+            const entryPath = indexFiles[0].path;
+            const entryDir = entryPath.includes('/') ? entryPath.slice(0, entryPath.lastIndexOf('/') + 1) : '';
+            const included = jsFiles.filter(e => e.path.startsWith(entryDir));
+
+            return Promise.all(included.map(e =>
+                forgejoRequest('GET', `/repos/${owner}/${repo}/contents/${_encodeRepoPath(e.path)}?ref=${ref}`)
+                    .then(fileData => ({
+                        path: e.path.slice(entryDir.length),
+                        content: Buffer.from(fileData.content, 'base64').toString('utf8'),
+                    }))
+            )).then(fileList => {
+                const files = {};
+                for (const f of fileList) files[f.path] = f.content;
+                const entryPoint = entryPath.slice(entryDir.length);
+                const meta = localPlay.parseGameSourceMetadata(files[entryPoint]);
+                const playable = localPlay.checkLocalPlayable(meta);
+                return { gameName: meta.name || game.name || 'Homegames', files, entryPoint, meta, playable };
+            });
+        });
+
+    promise.catch(() => _localContextCache.delete(cacheKey));
+    _localContextCache.set(cacheKey, promise);
+    _capLocalCache(_localContextCache);
+    return promise;
+};
+
+// Builds the binary type-1 asset bundle for a version. Asset reads run in
+// small batches — a game can declare 80+ assets and each read is a Mongo
+// findOne, so an unbounded fan-out would saturate the connection pool.
+const buildLocalAssetBundle = (gameId, ref) => {
+    const cacheKey = `${gameId}:${ref}`;
+    if (_localBundleCache.has(cacheKey)) return _localBundleCache.get(cacheKey);
+
+    const promise = getLocalPlayContext(gameId, ref).then(context => {
+        const assets = context.meta.assets || [];
+        if (!assets.length) return Buffer.alloc(0);
+
+        const entries = [];
+        const BATCH_SIZE = 8;
+        const runBatch = (start) => {
+            if (start >= assets.length) return Promise.resolve();
+            return Promise.all(assets.slice(start, start + BATCH_SIZE).map(a =>
+                getMongoDocument(a.id).then(doc => {
+                    if (!doc || !doc.data) throw `Asset ${a.id} (${a.key}) not found`;
+                    const data = Buffer.from(doc.data.buffer);
+                    // A truncated asset poisons the whole bundle — refuse to serve it.
+                    if (doc.fileSize && data.length !== doc.fileSize) {
+                        throw `Asset ${a.id} (${a.key}) is truncated: ${data.length}/${doc.fileSize} bytes`;
+                    }
+                    entries.push({ key: a.key, type: a.type, data });
+                })
+            )).then(() => runBatch(start + BATCH_SIZE));
+        };
+
+        return runBatch(0).then(() => {
+            // Restore declared order (batch completion can interleave pushes)
+            const order = {};
+            assets.forEach((a, i) => { order[a.key] = i; });
+            entries.sort((x, y) => order[x.key] - order[y.key]);
+            return localPlay.packAssetBundle(entries);
+        });
+    });
+
+    promise.catch(() => _localBundleCache.delete(cacheKey));
+    _localBundleCache.set(cacheKey, promise);
+    _capLocalCache(_localBundleCache);
+    return promise;
+};
+
+const _localPlayError = (res, err) => {
+    console.error('[local-play]', err);
+    if (typeof err === 'string') {
+        const status = err.includes('not published') || err.includes('not found') ? 404 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err }));
+    } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal error' }));
+    }
+};
+
+const _requireRef = (req, res) => {
+    const ref = url.parse(req.url, true).query.ref;
+    if (!ref) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'ref parameter is required' }));
+        return null;
+    }
+    return ref;
+};
+
+function handleGetLocalManifest(req, res, gameId) {
+    const ref = _requireRef(req, res);
+    if (!ref) return;
+
+    getLocalPlayContext(gameId, ref).then(context => {
+        res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+        });
+        res.end(JSON.stringify({
+            localPlayable: context.playable.playable,
+            reason: context.playable.reason || null,
+            name: context.gameName,
+            squishVersion: context.meta.squishVersion,
+            entryPoint: context.entryPoint,
+            files: context.files,
+            assetCount: (context.meta.assets || []).length,
+            assetBundleUrl: `/games/${gameId}/asset-bundle?ref=${ref}`,
+        }));
+    }).catch(err => _localPlayError(res, err));
+}
+
+function handleGetLocalAssetBundle(req, res, gameId) {
+    const ref = _requireRef(req, res);
+    if (!ref) return;
+
+    const etag = `"bundle-${gameId}-${ref}"`;
+    if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { 'ETag': etag });
+        res.end();
+        return;
+    }
+
+    buildLocalAssetBundle(gameId, ref).then(bundle => {
+        res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': bundle.length,
+            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+            'ETag': etag,
+        });
+        res.end(bundle);
+    }).catch(err => _localPlayError(res, err));
+}
+
+function handleGetLocalDownload(req, res, gameId) {
+    const ref = _requireRef(req, res);
+    if (!ref) return;
+
+    let clientBundleSource;
+    try {
+        clientBundleSource = getClientBundleSource();
+    } catch (e) {
+        console.error('[local-play] client bundle unavailable at ' + CLIENT_BUNDLE_PATH, e.message);
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Downloads are not available on this server' }));
+        return;
+    }
+
+    Promise.all([
+        getLocalPlayContext(gameId, ref),
+        buildLocalAssetBundle(gameId, ref),
+    ]).then(([context, bundle]) => {
+        if (!context.playable.playable) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: context.playable.reason }));
+            return;
+        }
+
+        const html = localPlay.buildLocalHtml({
+            name: context.gameName,
+            files: context.files,
+            entryPoint: context.entryPoint,
+            assetBundleBase64: bundle.length ? bundle.toString('base64') : null,
+            clientBundleSource,
+        });
+
+        const safeName = (context.gameName || 'game').replace(/[^a-zA-Z0-9-_ ]/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'game';
+        res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Disposition': `attachment; filename="${safeName}.html"`,
+            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+        });
+        res.end(html);
+    }).catch(err => _localPlayError(res, err));
+}
+
+module.exports.handleGetLocalManifest = handleGetLocalManifest;
+module.exports.handleGetLocalAssetBundle = handleGetLocalAssetBundle;
+module.exports.handleGetLocalDownload = handleGetLocalDownload;

@@ -257,13 +257,13 @@ const validatePublishRequest = async (gameId, commitSha) => {
 
         // Run Docker validation if available
         let validationResult = null;
+        // Detect squish version from the source
+        let squishVersion = '135';
+        const squishMatch = indexContent.match(/squishVersion\s*:\s*['"](\w+)['"]/);
+        if (squishMatch) squishVersion = squishMatch[1];
+
         if (validateGame) {
             console.log(`[worker] Running Docker validation for ${owner}/${repo}`);
-
-            // Detect squish version from the source
-            let squishVersion = '135';
-            const squishMatch = indexContent.match(/squishVersion\s*:\s*['"](\w+)['"]/);
-            if (squishMatch) squishVersion = squishMatch[1];
 
             validationResult = await validateGame({
                 codePath: extractedPath,
@@ -280,7 +280,11 @@ const validatePublishRequest = async (gameId, commitSha) => {
             return { success: false, error: 'Docker validation is required but not available' };
         }
 
-        return { success: true, assetIds: validationResult.assetIds || [] };
+        return {
+            success: true,
+            assetIds: validationResult.assetIds || [],
+            squishVersion: validationResult.squishVersion || squishVersion,
+        };
     } finally {
         // Clean up extracted files
         if (extractedPath) {
@@ -348,6 +352,10 @@ const handlePublishRequest = async (message) => {
                 publishedBy: userId,
                 published: true,
                 nsfw: isNsfw,
+                // Captured so consumers (local play, catalog) don't have to
+                // re-derive them from source later.
+                assets: result.assetIds || [],
+                squishVersion: result.squishVersion || null,
             });
 
             // Update game record to reflect latest version's NSFW status

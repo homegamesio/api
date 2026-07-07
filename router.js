@@ -61,6 +61,9 @@ const createSessionRegex = '/sessions';
 const publishedVersionsRegex = '/games/(\\S*)/published-versions';
 const gameSourceTreeRegex = '/games/(\\S*)/source-tree';
 const gameSourceFileRegex = '/games/(\\S*)/source';
+const gameLocalManifestRegex = '/games/(\\S*)/local-manifest';
+const gameLocalAssetBundleRegex = '/games/(\\S*)/asset-bundle';
+const gameLocalDownloadRegex = '/games/(\\S*)/download';
 const assetTagsRegex = '/assets/(\\S*)/tags';
 const assetMetaRegex = '/assets/(\\S*)/meta';
 
@@ -214,6 +217,9 @@ const buildRequestHandlers = (h, s) => ({
         [listGamesRegex]: { handle: h.handleListGames },
         [gameSourceTreeRegex]: { handle: h.handleGetGameSourceTree },
         [gameSourceFileRegex]: { handle: h.handleGetGameSourceFile },
+        [gameLocalManifestRegex]: { handle: h.handleGetLocalManifest },
+        [gameLocalAssetBundleRegex]: { handle: h.handleGetLocalAssetBundle },
+        [gameLocalDownloadRegex]: { handle: h.handleGetLocalDownload },
         [publishedVersionsRegex]: { handle: h.handleGetPublishedVersions },
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },
