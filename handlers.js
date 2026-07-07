@@ -1615,12 +1615,56 @@ const getClientBundleSource = () => {
     return _clientBundleSource;
 };
 
-// Both caches key on gameId:ref — content is immutable per published commit.
+// All caches key on gameId:ref — content is immutable per published commit,
+// so entries never need invalidation, only eviction.
 const LOCAL_CACHE_MAX = 32;
 const _localContextCache = new Map();
-const _localBundleCache = new Map();
 const _capLocalCache = (map) => {
     while (map.size > LOCAL_CACHE_MAX) map.delete(map.keys().next().value);
+};
+
+// Byte-budgeted LRU for the big artifacts (asset bundles, composed download
+// HTML) — these run 10-20MB each, so a count cap alone could balloon memory.
+class LocalByteCache {
+    constructor(maxBytes) {
+        this.maxBytes = maxBytes;
+        this.map = new Map();
+        this.bytes = 0;
+    }
+    get(key) {
+        const entry = this.map.get(key);
+        if (!entry) return null;
+        this.map.delete(key);
+        this.map.set(key, entry); // LRU touch
+        return entry.value;
+    }
+    set(key, value, size) {
+        const existing = this.map.get(key);
+        if (existing) { this.bytes -= existing.size; this.map.delete(key); }
+        this.map.set(key, { value, size });
+        this.bytes += size;
+        while (this.bytes > this.maxBytes && this.map.size > 1) {
+            const oldest = this.map.keys().next().value;
+            this.bytes -= this.map.get(oldest).size;
+            this.map.delete(oldest);
+        }
+    }
+}
+
+const _localBundleBytes = new LocalByteCache(192 * 1024 * 1024);
+const _localHtmlBytes = new LocalByteCache(128 * 1024 * 1024);
+const _localBundleInflight = new Map(); // dedups concurrent builds (stampede guard)
+
+// Cache misses are the expensive path (Forgejo fetches, dozens of Mongo asset
+// reads, MB-scale composition), and downloads serve 10-20MB responses — cap
+// per-IP rates. Cache hits are cheap and repeat visits mostly 304 anyway.
+const localManifestLimiter = rateLimit('local-manifest', 60 * 1000, 30);
+const localBundleLimiter = rateLimit('local-bundle', 60 * 1000, 20);
+const localDownloadLimiter = rateLimit('local-download', 60 * 1000, 6);
+
+const _tooMany = (res) => {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Too many requests — try again in a minute' }));
 };
 
 const _encodeRepoPath = (p) => p.split('/').map(encodeURIComponent).join('/');
@@ -1677,7 +1721,9 @@ const getLocalPlayContext = (gameId, ref) => {
 // findOne, so an unbounded fan-out would saturate the connection pool.
 const buildLocalAssetBundle = (gameId, ref) => {
     const cacheKey = `${gameId}:${ref}`;
-    if (_localBundleCache.has(cacheKey)) return _localBundleCache.get(cacheKey);
+    const cached = _localBundleBytes.get(cacheKey);
+    if (cached) return Promise.resolve(cached);
+    if (_localBundleInflight.has(cacheKey)) return _localBundleInflight.get(cacheKey);
 
     const promise = getLocalPlayContext(gameId, ref).then(context => {
         const assets = context.meta.assets || [];
@@ -1707,11 +1753,16 @@ const buildLocalAssetBundle = (gameId, ref) => {
             entries.sort((x, y) => order[x.key] - order[y.key]);
             return localPlay.packAssetBundle(entries);
         });
+    }).then(bundle => {
+        _localBundleBytes.set(cacheKey, bundle, bundle.length);
+        _localBundleInflight.delete(cacheKey);
+        return bundle;
+    }).catch(err => {
+        _localBundleInflight.delete(cacheKey);
+        throw err;
     });
 
-    promise.catch(() => _localBundleCache.delete(cacheKey));
-    _localBundleCache.set(cacheKey, promise);
-    _capLocalCache(_localBundleCache);
+    _localBundleInflight.set(cacheKey, promise);
     return promise;
 };
 
@@ -1741,14 +1792,27 @@ function handleGetLocalManifest(req, res, gameId) {
     const ref = _requireRef(req, res);
     if (!ref) return;
 
+    const etag = `"manifest-${gameId}-${ref}"`;
+    if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { 'ETag': etag });
+        res.end();
+        return;
+    }
+
+    if (!localManifestLimiter(getClientIP(req))) return _tooMany(res);
+
     getLocalPlayContext(gameId, ref).then(context => {
+        const downloadable = localPlay.checkDownloadable(context.meta);
         res.writeHead(200, {
             'Content-Type': 'application/json',
             'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+            'ETag': etag,
         });
         res.end(JSON.stringify({
             localPlayable: context.playable.playable,
             reason: context.playable.reason || null,
+            multiplayer: (context.meta.services || []).includes('multiplayer'),
+            downloadable: downloadable.downloadable,
             name: context.gameName,
             squishVersion: context.meta.squishVersion,
             entryPoint: context.entryPoint,
@@ -1770,6 +1834,8 @@ function handleGetLocalAssetBundle(req, res, gameId) {
         return;
     }
 
+    if (!localBundleLimiter(getClientIP(req))) return _tooMany(res);
+
     buildLocalAssetBundle(gameId, ref).then(bundle => {
         res.writeHead(200, {
             'Content-Type': 'application/octet-stream',
@@ -1785,6 +1851,34 @@ function handleGetLocalDownload(req, res, gameId) {
     const ref = _requireRef(req, res);
     if (!ref) return;
 
+    const etag = `"download-${gameId}-${ref}"`;
+    if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { 'ETag': etag });
+        res.end();
+        return;
+    }
+
+    const shortSha = String(ref).slice(0, 7);
+    const cacheKey = `${gameId}:${ref}`;
+
+    const serve = (htmlBuffer, gameName) => {
+        const safeName = (gameName || 'game').replace(/[^a-zA-Z0-9-_ ]/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'game';
+        res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': htmlBuffer.length,
+            'Content-Disposition': `attachment; filename="${safeName}-${shortSha}.html"`,
+            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+            'ETag': etag,
+        });
+        res.end(htmlBuffer);
+    };
+
+    // Composed HTML is cached — a hit costs one buffer write, no composition.
+    const cached = _localHtmlBytes.get(cacheKey);
+    if (cached) return serve(cached.html, cached.name);
+
+    if (!localDownloadLimiter(getClientIP(req))) return _tooMany(res);
+
     let clientBundleSource;
     try {
         clientBundleSource = getClientBundleSource();
@@ -1799,27 +1893,25 @@ function handleGetLocalDownload(req, res, gameId) {
         getLocalPlayContext(gameId, ref),
         buildLocalAssetBundle(gameId, ref),
     ]).then(([context, bundle]) => {
-        if (!context.playable.playable) {
+        // Multiplayer games are downloadable (they run as a solo local
+        // session); only structurally-broken games are refused.
+        const downloadable = localPlay.checkDownloadable(context.meta);
+        if (!downloadable.downloadable) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: context.playable.reason }));
+            res.end(JSON.stringify({ error: downloadable.reason }));
             return;
         }
 
-        const html = localPlay.buildLocalHtml({
+        const html = Buffer.from(localPlay.buildLocalHtml({
             name: context.gameName,
             files: context.files,
             entryPoint: context.entryPoint,
             assetBundleBase64: bundle.length ? bundle.toString('base64') : null,
             clientBundleSource,
-        });
+        }));
 
-        const safeName = (context.gameName || 'game').replace(/[^a-zA-Z0-9-_ ]/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'game';
-        res.writeHead(200, {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Content-Disposition': `attachment; filename="${safeName}.html"`,
-            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
-        });
-        res.end(html);
+        _localHtmlBytes.set(cacheKey, { html, name: context.gameName }, html.length);
+        serve(html, context.gameName);
     }).catch(err => _localPlayError(res, err));
 }
 

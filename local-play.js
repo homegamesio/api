@@ -125,6 +125,18 @@ const checkLocalPlayable = (meta) => {
     return { playable: true };
 };
 
+// Downloads are more permissive than instant play: multiplayer games may be
+// downloaded (they run as a solo local session — the UI notes that
+// multiplayer features won't work), but games that structurally can't run
+// (parse failures, services with no local fallback) may not.
+const checkDownloadable = (meta) => {
+    if (meta.error) return { downloadable: false, reason: meta.error };
+    if (meta.services.includes('contentGenerator')) {
+        return { downloadable: false, reason: 'Game requires the contentGenerator service' };
+    }
+    return { downloadable: true };
+};
+
 // ---------------------------------------------------------------------------
 // Asset bundle packing — must stay byte-identical to Squisher.initialize()
 // in squish (src/Squisher.js): per asset a 44-byte header
@@ -231,6 +243,7 @@ window.__HG_LOCAL_GAME__ = ${payload};
 module.exports = {
     parseGameSourceMetadata,
     checkLocalPlayable,
+    checkDownloadable,
     packAssetBundle,
     buildLocalHtml,
 };
