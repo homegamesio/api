@@ -1063,6 +1063,19 @@ const handleGetTemplates = (req, res) => {
     res.end(JSON.stringify({ templates }));
 };
 
+// Template file contents. Public — lets the Studio's guest mode load a
+// template into the in-browser editor without an account.
+const handleGetTemplateFiles = (req, res, templateId) => {
+    const tmpl = GAME_TEMPLATES[templateId];
+    if (!tmpl) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unknown template: ' + templateId }));
+        return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ id: templateId, label: tmpl.label, files: tmpl.files }));
+};
+
 // ---------------------------------------------------------------------------
 // File operations
 // ---------------------------------------------------------------------------
@@ -2233,6 +2246,7 @@ const handleLLMResult = (req, res) => {
 module.exports = {
     handleStudioCreateGame,
     handleGetTemplates,
+    handleGetTemplateFiles,
     handleGetFiles,
     handleGetFileContent,
     handleSaveVersion,
