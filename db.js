@@ -516,6 +516,7 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 id: gameResult.gameId,
                                 featured: gameResult.featured || false,
                                 sessionCount,
+                                downloadCount: gameResult.downloadCount || 0,
                             },
                             versions: versions.map(v => {
                                 return {
@@ -534,6 +535,13 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
         }).catch(reject);
     }).catch(reject);
 });
+
+// Fire-and-forget download counter — a failed increment never blocks a download.
+const incrementGameDownloads = (gameId) => {
+    getMongoCollection('games')
+        .then(collection => collection.updateOne({ gameId }, { $inc: { downloadCount: 1 } }))
+        .catch(err => console.error('Failed to increment download count', gameId, err));
+};
 
 const getPublishRequest = (requestId) => new Promise((resolve, reject) => {
     getMongoCollection('publishRequests').then((collection) => {
@@ -855,6 +863,7 @@ module.exports = {
     listGamesForAuthor,
     mongoListGamesForAuthor,
     getGameDetails,
+    incrementGameDownloads,
     getPublishRequest,
     updatePublishRequestState,
     adminPublishRequestAction,

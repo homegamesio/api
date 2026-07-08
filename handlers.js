@@ -69,7 +69,7 @@ const {
     getProfileInfo, getGame, updateGame, listAssets, createAssetRecord,
     getAssetCount, MAX_ASSETS_PER_USER,
     adminListPendingPublishRequests, adminAcknowledgeMessage, adminListSupportMessages,
-    adminListFailedPublishRequests, listPublishRequests, getGameDetails,
+    adminListFailedPublishRequests, listPublishRequests, getGameDetails, incrementGameDownloads,
     getPublishRequest, updatePublishRequestState, adminPublishRequestAction,
     listMyGames, updateMongoProfileInfo, deleteGame, getCertStatus,
     updateAssetTags, listPublicAssets, updateAsset, deleteAsset,
@@ -1862,6 +1862,7 @@ function handleGetLocalDownload(req, res, gameId) {
     const cacheKey = `${gameId}:${ref}`;
 
     const serve = (htmlBuffer, gameName) => {
+        incrementGameDownloads(gameId);
         const safeName = (gameName || 'game').replace(/[^a-zA-Z0-9-_ ]/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'game';
         res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
