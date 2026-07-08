@@ -186,7 +186,7 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
         const db = client.db(DB_NAME);
         const collection = db.collection('users');
         collection.findOne({ userId }).then((userResponse) => {
-            const { userId, created, image, description, btcAddress } = userResponse;
+            const { userId, displayName, created, image, description, btcAddress } = userResponse;
 
             // Total downloads (incl. counted plays) across all of this dev's games
             db.collection('games').aggregate([
@@ -195,6 +195,8 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
             ]).toArray().then(agg => {
                 resolve({
                     username: userId,
+                    // Fallback for accounts predating displayName that missed the backfill
+                    displayName: displayName || userId,
                     created,
                     image,
                     description,
@@ -512,13 +514,15 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
             } else {
                 getMongoCollection('gameVersions').then(versionCollection => {
                     versionCollection.find({ gameId }).limit(10).sort({ publishedAt: -1 }).toArray().then(versions => {
-                        getMongoCollection('sessions').then(sessionCollection => sessionCollection.countDocuments({ gameId })).then(sessionCount => {
+                        getMongoCollection('sessions').then(sessionCollection => sessionCollection.countDocuments({ gameId })).then(sessionCount =>
+                        getMongoCollection('users').then(userCollection => userCollection.findOne({ userId: gameResult.developerId })).then(developer => {
                         resolve({
                             game: {
                                 name: gameResult.name,
                                 description: gameResult.description,
                                 created: gameResult.created,
                                 developerId: gameResult.developerId,
+                                developerName: (developer && developer.displayName) || gameResult.developerId,
                                 thumbnail: gameResult.thumbnail,
                                 id: gameResult.gameId,
                                 featured: gameResult.featured || false,
@@ -535,7 +539,8 @@ const getGameDetails = (gameId) => new Promise((resolve, reject) => {
                                 }
                             })
                         });
-                        }).catch(reject);
+                        }).catch(reject)
+                        ).catch(reject);
                     }).catch(reject);
                 }).catch(reject);
             }
