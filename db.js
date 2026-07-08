@@ -188,14 +188,21 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
         collection.findOne({ userId }).then((userResponse) => {
             const { userId, created, image, description, btcAddress } = userResponse;
 
+            // Total downloads (incl. counted plays) across all of this dev's games
+            db.collection('games').aggregate([
+                { $match: { developerId: userId } },
+                { $group: { _id: null, total: { $sum: { $ifNull: ['$downloadCount', 0] } } } },
+            ]).toArray().then(agg => {
                 resolve({
                     username: userId,
                     created,
                     image,
                     description,
                     btcAddress: btcAddress || null,
+                    totalDownloads: (agg[0] && agg[0].total) || 0,
                 });
-        });
+            }).catch(reject);
+        }).catch(reject);
     }).catch(reject);
 });
 

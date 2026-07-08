@@ -1661,6 +1661,7 @@ const _localBundleInflight = new Map(); // dedups concurrent builds (stampede gu
 const localManifestLimiter = rateLimit('local-manifest', 60 * 1000, 30);
 const localBundleLimiter = rateLimit('local-bundle', 60 * 1000, 20);
 const localDownloadLimiter = rateLimit('local-download', 60 * 1000, 6);
+const playCountLimiter = rateLimit('play-count', 60 * 1000, 12);
 
 const _tooMany = (res) => {
     res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -1847,6 +1848,15 @@ function handleGetLocalAssetBundle(req, res, gameId) {
     }).catch(err => _localPlayError(res, err));
 }
 
+// Beacon from the game page's Play button — local plays count toward the
+// game's download total (playing locally downloads the game to the browser).
+function handleCountPlay(req, res, gameId) {
+    if (!playCountLimiter(getClientIP(req))) return _tooMany(res);
+    incrementGameDownloads(gameId);
+    res.writeHead(204);
+    res.end();
+}
+
 function handleGetLocalDownload(req, res, gameId) {
     const ref = _requireRef(req, res);
     if (!ref) return;
@@ -1918,4 +1928,5 @@ function handleGetLocalDownload(req, res, gameId) {
 
 module.exports.handleGetLocalManifest = handleGetLocalManifest;
 module.exports.handleGetLocalAssetBundle = handleGetLocalAssetBundle;
+module.exports.handleCountPlay = handleCountPlay;
 module.exports.handleGetLocalDownload = handleGetLocalDownload;

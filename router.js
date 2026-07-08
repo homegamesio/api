@@ -64,6 +64,7 @@ const gameSourceFileRegex = '/games/(\\S*)/source';
 const gameLocalManifestRegex = '/games/(\\S*)/local-manifest';
 const gameLocalAssetBundleRegex = '/games/(\\S*)/asset-bundle';
 const gameLocalDownloadRegex = '/games/(\\S*)/download';
+const gamePlayCountRegex = '/games/(\\S*)/play';
 const assetTagsRegex = '/assets/(\\S*)/tags';
 const assetMetaRegex = '/assets/(\\S*)/meta';
 
@@ -196,6 +197,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
         [llmResultRegex]: { handle: s.handleLLMResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
+        [gamePlayCountRegex]: { handle: h.handleCountPlay },
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
         [adminAssetNsfwRegex]: { requiresAuth: true, handle: h.handleAdminSetAssetNsfw },
