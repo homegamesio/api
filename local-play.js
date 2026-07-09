@@ -111,24 +111,22 @@ const parseGameSourceMetadata = (source) => {
 };
 
 /**
- * Whether a game is eligible to run client-side. Games are single-player by
- * default; declaring a service the local runtime can't provide opts out.
+ * Whether a game is eligible to run client-side. Multiplayer games qualify —
+ * they run as a solo local session (hosted sessions are offered separately on
+ * the game page); only games that structurally can't run locally (parse
+ * failures, services with no local fallback) opt out.
  */
 const checkLocalPlayable = (meta) => {
     if (meta.error) return { playable: false, reason: meta.error };
-    if (meta.services.includes('multiplayer')) {
-        return { playable: false, reason: 'Game requires multiplayer' };
-    }
     if (meta.services.includes('contentGenerator')) {
         return { playable: false, reason: 'Game requires the contentGenerator service' };
     }
     return { playable: true };
 };
 
-// Downloads are more permissive than instant play: multiplayer games may be
-// downloaded (they run as a solo local session — the UI notes that
-// multiplayer features won't work), but games that structurally can't run
-// (parse failures, services with no local fallback) may not.
+// Same policy as instant play: multiplayer games may be downloaded (they run
+// as a solo local session — the UI notes that multiplayer features won't
+// work), but games that structurally can't run may not.
 const checkDownloadable = (meta) => {
     if (meta.error) return { downloadable: false, reason: meta.error };
     if (meta.services.includes('contentGenerator')) {

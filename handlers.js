@@ -1592,9 +1592,9 @@ function handleGetGameSourceFile(req, res, gameId) {
 }
 
 // ---------------------------------------------------------------------------
-// Local play — client-side single-player sessions + single-file downloads.
-// Games are single-player by default; declaring services: ['multiplayer']
-// (or another service the local runtime can't provide) opts a game out.
+// Local play — client-side solo sessions + single-file downloads. Multiplayer
+// games run locally too (as a solo session); only services the local runtime
+// can't provide (e.g. contentGenerator) opt a game out.
 // All static analysis — game code is never executed on the API.
 // ---------------------------------------------------------------------------
 
