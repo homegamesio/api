@@ -831,9 +831,80 @@ const setAssetNsfw = (assetId, nsfw) => new Promise((resolve, reject) => {
     getMongoCollection('assets').then(c => c.updateOne({ assetId }, { $set: { nsfw: !!nsfw } }).then(resolve).catch(reject)).catch(reject);
 });
 
+// Game comments. displayName is denormalized at write time (display names are
+// immutable). Anonymous comments have userId/displayName null and carry only a
+// hashed source IP, used to enforce the anonymous limit here in Mongo rather
+// than in memory — a 2-hour window has to survive process restarts (same
+// approach as createSupportMessage).
+const ANON_COMMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+const createComment = ({ gameId, text, userId, displayName, sourceIp }) => new Promise((resolve, reject) => {
+    getMongoCollection('comments').then((collection) => {
+        const now = Date.now();
+        const insert = () => {
+            const comment = {
+                id: generateId(),
+                gameId,
+                text,
+                userId: userId || null,
+                displayName: displayName || null,
+                ipHash: userId ? null : hashValue(sourceIp),
+                created: now,
+            };
+            collection.insertOne(comment).then(() => resolve({
+                id: comment.id,
+                gameId,
+                text,
+                displayName: comment.displayName,
+                created: now,
+            })).catch(reject);
+        };
+        if (userId) {
+            insert();
+            return;
+        }
+        // Anonymous: one comment per 2 hours per IP, across all games.
+        collection.countDocuments({ ipHash: hashValue(sourceIp), created: { '$gte': now - ANON_COMMENT_WINDOW_MS } }).then((recentCount) => {
+            if (recentCount >= 1) {
+                reject({ type: 'TOO_MANY_COMMENTS', message: 'Anonymous commenting is limited to one comment every 2 hours' });
+            } else {
+                insert();
+            }
+        }).catch(reject);
+    }).catch(reject);
+});
+
+// Newest 100 — enough for v1; add pagination if any game outgrows it.
+const listComments = (gameId) => new Promise((resolve, reject) => {
+    getMongoCollection('comments').then((collection) => {
+        collection.find({ gameId }).sort({ created: -1 }).limit(100).toArray().then((comments) => {
+            resolve(comments.map(c => ({
+                id: c.id,
+                gameId: c.gameId,
+                text: c.text,
+                displayName: c.displayName,
+                userId: c.userId || null,
+                created: c.created,
+            })));
+        }).catch(reject);
+    }).catch(reject);
+});
+
+const getComment = (id) => new Promise((resolve, reject) => {
+    getMongoCollection('comments').then(collection => collection.findOne({ id }).then(resolve).catch(reject)).catch(reject);
+});
+
+const deleteComment = (id) => new Promise((resolve, reject) => {
+    getMongoCollection('comments').then(collection => collection.deleteOne({ id }).then(resolve).catch(reject)).catch(reject);
+});
+
 module.exports = {
     getMongoClient,
     getMongoCollection,
+    createComment,
+    listComments,
+    getComment,
+    deleteComment,
     adminListUsers,
     adminListGames,
     adminListAllAssets,

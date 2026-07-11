@@ -65,6 +65,8 @@ const gameLocalManifestRegex = '/games/(\\S*)/local-manifest';
 const gameLocalAssetBundleRegex = '/games/(\\S*)/asset-bundle';
 const gameLocalDownloadRegex = '/games/(\\S*)/download';
 const gamePlayCountRegex = '/games/(\\S*)/play';
+const gameCommentsRegex = '/games/(\\S*)/comments';
+const commentDetailRegex = '/comments/(\\S*)';
 const assetTagsRegex = '/assets/(\\S*)/tags';
 const assetMetaRegex = '/assets/(\\S*)/meta';
 
@@ -163,6 +165,7 @@ const buildRequestHandlers = (h, s) => ({
         [deleteDeveloperRegex]: { requiresAuth: true, handle: h.handleDeleteDeveloper },
         [gameDetailRegex]: { requiresAuth: true, handle: h.handleDeleteGame },
         [assetsRegex]: { requiresAuth: true, handle: h.handleDeleteAsset },
+        [commentDetailRegex]: { requiresAuth: true, handle: h.handleDeleteComment },
     },
     'POST': {
         [mapRegex]: { handle: h.handlePostMap },
@@ -198,6 +201,9 @@ const buildRequestHandlers = (h, s) => ({
         [llmResultRegex]: { handle: s.handleLLMResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [gamePlayCountRegex]: { handle: h.handleCountPlay },
+        // No requiresAuth: comments accept optional auth (anonymous allowed);
+        // the handler verifies the token itself when one is sent.
+        [gameCommentsRegex]: { handle: h.handlePostComment },
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
         [adminAssetNsfwRegex]: { requiresAuth: true, handle: h.handleAdminSetAssetNsfw },
@@ -224,6 +230,7 @@ const buildRequestHandlers = (h, s) => ({
         [gameLocalAssetBundleRegex]: { handle: h.handleGetLocalAssetBundle },
         [gameLocalDownloadRegex]: { handle: h.handleGetLocalDownload },
         [publishedVersionsRegex]: { handle: h.handleGetPublishedVersions },
+        [gameCommentsRegex]: { handle: h.handleGetComments },
         [gameDetailRegex]: { handle: h.handleGetGameDetail },
         [ipRegex]: { handle: h.handleGetIp },
         [gameVersionDetailRegex]: { handle: h.handleGetGameVersionDetail },

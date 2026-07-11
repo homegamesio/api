@@ -61,10 +61,11 @@ const signupLimiter = rateLimit('signup', 24 * 60 * 60 * 1000, 1);       // 1 si
 const SESSION_CREATE_WINDOW_MS = 30 * 1000;
 const sessionCreateLimiter = rateLimit('session-create', SESSION_CREATE_WINDOW_MS, 1);  // 1 session per 30s per IP
 const certRequestLimiter = rateLimit('cert-request', 60 * 60 * 1000, 5); // 5 cert requests per hour per IP (each triggers a real ACME order)
-const { generateId, getHash, generateJwt } = require('./crypto');
+const { generateId, getHash, generateJwt, verifyToken } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
     getUserRecord, createSupportMessage, createBlogPost, getBlogPost, listBlogPosts,
+    createComment, listComments, getComment, deleteComment,
     getMongoAsset, getMongoDocument, getMongoCollection, uploadMongo,
     getProfileInfo, getGame, updateGame, listAssets, createAssetRecord,
     getAssetCount, MAX_ASSETS_PER_USER,
@@ -1496,6 +1497,130 @@ const handleGetPublishedVersions = (req, res, gameId) => {
     });
 };
 
+// ---------------------------------------------------------------------------
+// Game comments
+// ---------------------------------------------------------------------------
+const MAX_COMMENT_LENGTH = 200;
+const commentLimiter = rateLimit('comment', 10 * 60 * 1000, 1); // 1 comment / 10 min / authenticated user
+// The anonymous limit (1 / 2h / IP) is enforced in db.createComment against
+// Mongo, because a window that long shouldn't reset on process restart.
+
+// Auth is optional here — a valid Authorization header attributes the comment,
+// no header means anonymous. The router's requiresAuth flag is binary, so the
+// token check lives in the handler.
+const handlePostComment = (req, res, gameId) => {
+    const finish = (status, payload) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+    };
+
+    const authHeader = req.headers.authorization;
+    const resolveUser = authHeader
+        ? verifyToken(authHeader).then(userInfo => getUserRecord(userInfo.userId))
+        : Promise.resolve(null);
+
+    resolveUser.then((user) => {
+        // A client that sent a token expects attribution — reject a bad token
+        // rather than silently posting anonymously.
+        if (authHeader && !user) {
+            finish(401, { error: 'Invalid token' });
+            return;
+        }
+
+        getReqBody(req, (_data) => {
+            let body;
+            try {
+                body = JSON.parse(_data);
+            } catch (e) {
+                finish(400, { error: 'invalid request json' });
+                return;
+            }
+
+            const text = typeof body.text === 'string' ? body.text.trim() : '';
+            if (!text) {
+                finish(400, { error: 'Comment text required' });
+                return;
+            }
+            if (text.length > MAX_COMMENT_LENGTH) {
+                finish(400, { error: `Comments are limited to ${MAX_COMMENT_LENGTH} characters` });
+                return;
+            }
+
+            getGame(gameId).then(() => {
+                // Checked after validation so a rejected comment doesn't burn
+                // the user's slot (the limiter counts every check).
+                if (user && !commentLimiter(user.userId)) {
+                    finish(429, { error: 'You can comment once every 10 minutes. Please wait a bit.' });
+                    return;
+                }
+                createComment({
+                    gameId,
+                    text,
+                    userId: user && user.userId,
+                    displayName: user && user.displayName,
+                    sourceIp: getClientIP(req),
+                }).then((comment) => {
+                    finish(200, comment);
+                }).catch((err) => {
+                    if (err && err.type === 'TOO_MANY_COMMENTS') {
+                        finish(429, { error: err.message });
+                    } else {
+                        console.error(err);
+                        finish(500, { error: 'Failed to create comment' });
+                    }
+                });
+            }).catch(() => finish(404, { error: 'Game not found' }));
+        });
+    }).catch(() => finish(401, { error: 'Invalid token' }));
+};
+
+const handleGetComments = (req, res, gameId) => {
+    listComments(gameId).then((comments) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ comments }));
+    }).catch((err) => {
+        console.error(err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to list comments' }));
+    });
+};
+
+// Owner or admin. Anonymous comments have no owner, so admin is the only
+// removal path for those.
+const handleDeleteComment = (req, res, userId, commentId) => {
+    getComment(commentId).then((comment) => {
+        if (!comment) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not found' }));
+            return;
+        }
+        getUserRecord(userId).then((user) => {
+            const isAdmin = !!(user && user.isAdmin);
+            if (comment.userId !== userId && !isAdmin) {
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Not allowed' }));
+                return;
+            }
+            deleteComment(commentId).then(() => {
+                res.writeHead(204);
+                res.end();
+            }).catch((err) => {
+                console.error(err);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Failed to delete comment' }));
+            });
+        }).catch((err) => {
+            console.error(err);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'error' }));
+        });
+    }).catch((err) => {
+        console.error(err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'error' }));
+    });
+};
+
 module.exports = {
     setGameMaps,
     handleDeleteGame, handleDeleteAsset, handleDeleteDeveloper,
@@ -1506,6 +1631,7 @@ module.exports = {
     handleSignup, handleLogin, handleRequestAction,
     handleVerifyCode, handleResendVerification, handleMe,
     handleForgotPassword, handleResetPassword,
+    handlePostComment, handleGetComments, handleDeleteComment,
     handleGetMap, handleGetCertStatus, handleGetAsset,
     handleGetBlog, handleGetBlogDetail, handleGithubLink,
     handleGetPodcast, handleGetServiceRequest,
