@@ -623,7 +623,20 @@ const handleSignup = (req, res) => {
     });
 };
 
+// Password brute-force protection: bound attempts per source IP and, because an
+// attacker can rotate IPs, per target account. Successful logins count toward the
+// limits too, but they're set well above any legitimate login frequency.
+const loginIpLimiter = rateLimit('login-ip', 5 * 60 * 1000, 10);             // 10 / 5min / IP
+const loginAccountLimiter = rateLimit('login-account', 15 * 60 * 1000, 20);  // 20 / 15min / account
+
 const handleLogin = (req, res) => {
+    const ip = getClientIP(req);
+    if (!loginIpLimiter(ip)) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Too many login attempts. Please wait a few minutes.' }));
+        return;
+    }
+
     getReqBody(req, (_data) => {
         let loginBody = {};
         let err = false;
@@ -636,6 +649,14 @@ const handleLogin = (req, res) => {
         }
 
         if (!err) {
+            // Same normalization as auth.login so alias forms (case, whitespace)
+            // share one bucket.
+            const account = String(loginBody.username || '').trim().toLowerCase();
+            if (account && !loginAccountLimiter(account)) {
+                res.writeHead(429, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Too many login attempts for this account. Please wait a few minutes.' }));
+                return;
+            }
             console.log('want to login and generate token for user');
             login(loginBody).then(tokenPayload => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
