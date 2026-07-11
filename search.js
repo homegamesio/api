@@ -130,6 +130,11 @@ const mapGame = (game) => ({
     thumbnail: game.thumbnail,
     featured: game.featured || false,
     nsfw: !!game.nsfw,
+    // Play capabilities captured at publish time. null multiplayer = published
+    // before these were recorded (and not yet backfilled) — no inline play UI.
+    multiplayer: game.multiplayer == null ? null : !!game.multiplayer,
+    localPlayable: !!game.localPlayable,
+    latestPublishedSha: game.latestPublishedSha || null,
 });
 
 module.exports = {

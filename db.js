@@ -196,21 +196,27 @@ const getMongoProfileInfo = (userId) => new Promise((resolve, reject) => {
         collection.findOne({ userId }).then((userResponse) => {
             const { userId, displayName, created, image, description, btcAddress } = userResponse;
 
-            // Total downloads (incl. counted plays) across all of this dev's games
-            db.collection('games').aggregate([
-                { $match: { developerId: userId } },
-                { $group: { _id: null, total: { $sum: { $ifNull: ['$downloadCount', 0] } } } },
-            ]).toArray().then(agg => {
-                resolve({
-                    username: userId,
-                    // Fallback for accounts predating displayName that missed the backfill
-                    displayName: displayName || userId,
-                    created,
-                    image,
-                    description,
-                    btcAddress: btcAddress || null,
-                    totalDownloads: (agg[0] && agg[0].total) || 0,
-                });
+            // Total downloads (incl. counted plays) and hosted sessions created
+            // across all of this dev's games. One projected find serves both.
+            db.collection('games').find({ developerId: userId }, { projection: { gameId: 1, downloadCount: 1 } }).toArray().then((devGames) => {
+                const totalDownloads = devGames.reduce((sum, g) => sum + (g.downloadCount || 0), 0);
+                const gameIds = devGames.map(g => g.gameId);
+                const sessionsPromise = gameIds.length
+                    ? db.collection('sessions').countDocuments({ gameId: { $in: gameIds } })
+                    : Promise.resolve(0);
+                sessionsPromise.then((totalSessions) => {
+                    resolve({
+                        username: userId,
+                        // Fallback for accounts predating displayName that missed the backfill
+                        displayName: displayName || userId,
+                        created,
+                        image,
+                        description,
+                        btcAddress: btcAddress || null,
+                        totalDownloads,
+                        totalSessions,
+                    });
+                }).catch(reject);
             }).catch(reject);
         }).catch(reject);
     }).catch(reject);

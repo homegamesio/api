@@ -29,6 +29,7 @@ const {
     QUEUE_HOST,
 } = require('./config');
 const { forgejoRequest, downloadArchive } = require('./forgejo');
+const localPlay = require('./local-play');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -280,10 +281,18 @@ const validatePublishRequest = async (gameId, commitSha) => {
             return { success: false, error: 'Docker validation is required but not available' };
         }
 
+        // Derived from source metadata here at publish time so list endpoints
+        // (front page cards) never have to re-derive them from source.
+        const sourceMeta = localPlay.parseGameSourceMetadata(indexContent);
+        const multiplayer = !sourceMeta.error && sourceMeta.services.includes('multiplayer');
+        const localPlayable = localPlay.checkLocalPlayable(sourceMeta).playable;
+
         return {
             success: true,
             assetIds: validationResult.assetIds || [],
             squishVersion: validationResult.squishVersion || squishVersion,
+            multiplayer,
+            localPlayable,
         };
     } finally {
         // Clean up extracted files
@@ -356,11 +365,19 @@ const handlePublishRequest = async (message) => {
                 // re-derive them from source later.
                 assets: result.assetIds || [],
                 squishVersion: result.squishVersion || null,
+                multiplayer: !!result.multiplayer,
+                localPlayable: !!result.localPlayable,
             });
 
-            // Update game record to reflect latest version's NSFW status
+            // Update game record to reflect the latest version's NSFW status
+            // and play capabilities (consumed by list endpoints / front page).
             const gamesCollection = await getCollection('games');
-            await gamesCollection.updateOne({ gameId }, { $set: { nsfw: isNsfw } });
+            await gamesCollection.updateOne({ gameId }, { $set: {
+                nsfw: isNsfw,
+                multiplayer: !!result.multiplayer,
+                localPlayable: !!result.localPlayable,
+                latestPublishedSha: commitSha,
+            } });
 
             await publishRequests.updateOne({ requestId }, {
                 $set: { status: 'PUBLISHED', versionId, completedAt: Date.now() }
