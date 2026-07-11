@@ -16,6 +16,7 @@ const adminListFailedPublishRequestsRegex = '/admin/publish_requests/failed';
 const adminUsersRegex = '/admin/users';
 const adminGamesRegex = '/admin/games';
 const adminAssetsRegex = '/admin/assets';
+const adminCommentsRegex = '/admin/comments';
 const adminStatsRegex = '/admin/stats';
 const adminAssetNsfwRegex = '/admin/assets/(\\S*)/nsfw';
 const assetsListRegex = '/assets';
@@ -213,6 +214,7 @@ const buildRequestHandlers = (h, s) => ({
         [adminUsersRegex]: { requiresAuth: true, handle: h.handleAdminListUsers },
         [adminGamesRegex]: { requiresAuth: true, handle: h.handleAdminListGames },
         [adminAssetsRegex]: { requiresAuth: true, handle: h.handleAdminListAssets },
+        [adminCommentsRegex]: { requiresAuth: true, handle: h.handleAdminListComments },
         [adminStatsRegex]: { requiresAuth: true, handle: h.handleAdminStats },
         [mapRegex]: { handle: h.handleGetMap },
         [certStatusRegex]: { handle: h.handleGetCertStatus },

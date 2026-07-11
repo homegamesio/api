@@ -65,7 +65,8 @@ const { generateId, getHash, generateJwt, verifyToken } = require('./crypto');
 const { assetResponse } = require('./models');
 const {
     getUserRecord, createSupportMessage, createBlogPost, getBlogPost, listBlogPosts,
-    createComment, listComments, getComment, deleteComment,
+    createComment, listComments, getComment, deleteComment, adminListComments,
+    getAssetFileSizes,
     getMongoAsset, getMongoDocument, getMongoCollection, uploadMongo,
     getProfileInfo, getGame, updateGame, listAssets, createAssetRecord,
     getAssetCount, MAX_ASSETS_PER_USER,
@@ -1304,6 +1305,9 @@ const handleAdminListGames = (req, res, userId) =>
 const handleAdminListAssets = (req, res, userId) =>
     requireAdmin(userId, res, () => adminListResponder(req, res, adminListAllAssets));
 
+const handleAdminListComments = (req, res, userId) =>
+    requireAdmin(userId, res, () => adminListResponder(req, res, adminListComments));
+
 const handleAdminStats = (req, res, userId) =>
     requireAdmin(userId, res, () => {
         adminGetStats().then(stats => {
@@ -1575,9 +1579,12 @@ const handlePostComment = (req, res, gameId) => {
 };
 
 const handleGetComments = (req, res, gameId) => {
-    listComments(gameId).then((comments) => {
+    const query = url.parse(req.url, true).query;
+    const limit = Math.min(Math.max(parseInt(query.limit, 10) || 10, 1), 50);
+    const offset = Math.max(parseInt(query.offset, 10) || 0, 0);
+    listComments(gameId, limit, offset).then(({ comments, total }) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ comments }));
+        res.end(JSON.stringify({ comments, total, limit, offset }));
     }).catch((err) => {
         console.error(err);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1631,7 +1638,7 @@ module.exports = {
     handleSignup, handleLogin, handleRequestAction,
     handleVerifyCode, handleResendVerification, handleMe,
     handleForgotPassword, handleResetPassword,
-    handlePostComment, handleGetComments, handleDeleteComment,
+    handlePostComment, handleGetComments, handleDeleteComment, handleAdminListComments,
     handleGetMap, handleGetCertStatus, handleGetAsset,
     handleGetBlog, handleGetBlogDetail, handleGithubLink,
     handleGetPodcast, handleGetServiceRequest,
@@ -1936,11 +1943,58 @@ const _requireRef = (req, res) => {
     return ref;
 };
 
+// Estimated byte size of the single-file download, computed from stored asset
+// sizes so the manifest never has to compose the (10-20MB) artifact: per asset
+// a 44-byte bundle header + fileSize, base64 inflation (4/3), the inline JSON
+// payload, the client bundle, and the fixed HTML template. Exact when the
+// composed HTML is already cached; null when it can't be known cheaply
+// (missing size metadata, client bundle unavailable).
+const HTML_TEMPLATE_OVERHEAD = 1200;
+const estimateDownloadSizeBytes = (gameId, ref, context, downloadable) => {
+    if (!downloadable) return Promise.resolve(null);
+
+    const cached = _localHtmlBytes.get(`${gameId}:${ref}`);
+    if (cached) return Promise.resolve(cached.html.length);
+
+    let clientLen;
+    try {
+        clientLen = getClientBundleSource().length;
+    } catch (e) {
+        return Promise.resolve(null);
+    }
+
+    const assets = context.meta.assets || [];
+    const sizesPromise = assets.length ? getAssetFileSizes(assets.map(a => a.id)) : Promise.resolve([]);
+    return sizesPromise.then((docs) => {
+        const sizeById = {};
+        docs.forEach(d => { if (typeof d.fileSize === 'number') sizeById[d.assetId] = d.fileSize; });
+
+        let bundleBytes = 0;
+        for (const a of assets) {
+            if (sizeById[a.id] == null) return null; // unknown asset size — don't guess
+            bundleBytes += sizeById[a.id] + 44;
+        }
+
+        const b64Len = bundleBytes ? Math.ceil(bundleBytes / 3) * 4 : 0;
+        const payloadLen = Buffer.byteLength(JSON.stringify({
+            name: context.gameName,
+            files: context.files,
+            entryPoint: context.entryPoint,
+            assetBundleBase64: null,
+        }));
+        // The real payload swaps JSON's `null` (4 chars) for the quoted base64 string.
+        const payloadWithBundle = b64Len ? payloadLen - 4 + b64Len + 2 : payloadLen;
+
+        return clientLen + payloadWithBundle + HTML_TEMPLATE_OVERHEAD;
+    }).catch(() => null);
+};
+
 function handleGetLocalManifest(req, res, gameId) {
     const ref = _requireRef(req, res);
     if (!ref) return;
 
-    const etag = `"manifest-${gameId}-${ref}"`;
+    // v2: added downloadSizeBytes — new tag so revalidating clients pick it up.
+    const etag = `"manifest-v2-${gameId}-${ref}"`;
     if (req.headers['if-none-match'] === etag) {
         res.writeHead(304, { 'ETag': etag });
         res.end();
@@ -1951,23 +2005,26 @@ function handleGetLocalManifest(req, res, gameId) {
 
     getLocalPlayContext(gameId, ref).then(context => {
         const downloadable = localPlay.checkDownloadable(context.meta);
-        res.writeHead(200, {
-            'Content-Type': 'application/json',
-            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
-            'ETag': etag,
+        estimateDownloadSizeBytes(gameId, ref, context, downloadable.downloadable).then((downloadSizeBytes) => {
+            res.writeHead(200, {
+                'Content-Type': 'application/json',
+                'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+                'ETag': etag,
+            });
+            res.end(JSON.stringify({
+                localPlayable: context.playable.playable,
+                reason: context.playable.reason || null,
+                multiplayer: (context.meta.services || []).includes('multiplayer'),
+                downloadable: downloadable.downloadable,
+                downloadSizeBytes,
+                name: context.gameName,
+                squishVersion: context.meta.squishVersion,
+                entryPoint: context.entryPoint,
+                files: context.files,
+                assetCount: (context.meta.assets || []).length,
+                assetBundleUrl: `/games/${gameId}/asset-bundle?ref=${ref}`,
+            }));
         });
-        res.end(JSON.stringify({
-            localPlayable: context.playable.playable,
-            reason: context.playable.reason || null,
-            multiplayer: (context.meta.services || []).includes('multiplayer'),
-            downloadable: downloadable.downloadable,
-            name: context.gameName,
-            squishVersion: context.meta.squishVersion,
-            entryPoint: context.entryPoint,
-            files: context.files,
-            assetCount: (context.meta.assets || []).length,
-            assetBundleUrl: `/games/${gameId}/asset-bundle?ref=${ref}`,
-        }));
     }).catch(err => _localPlayError(res, err));
 }
 

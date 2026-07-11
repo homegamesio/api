@@ -50,6 +50,14 @@ const getMongoDocument = (assetId) => new Promise((resolve, reject) => {
     }).catch(reject);
 });
 
+// Size metadata only — never pulls the (potentially MB-scale) data field.
+const getAssetFileSizes = (assetIds) => new Promise((resolve, reject) => {
+    getMongoCollection('documents').then(c =>
+        c.find({ assetId: { $in: assetIds } }, { projection: { assetId: 1, fileSize: 1 } }).toArray()
+            .then(resolve).catch(reject)
+    ).catch(reject);
+});
+
 const getUserRecord = (userId) => new Promise((resolve, reject) => {
     getMongoCollection('users').then(collection => {
         collection.findOne({ userId }).then(resolve).catch(reject);
@@ -816,6 +824,16 @@ const adminListAllAssets = (search, limit, offset, sort) => {
     return adminPaginatedList('assets', query, null, limit, offset, sort);
 };
 
+const adminListComments = (search, limit, offset, sort) => {
+    let query = {};
+    if (search) {
+        const rx = { $regex: escapeRegex(search), $options: 'i' };
+        query = { $or: [{ text: rx }, { displayName: rx }, { gameId: search }, { userId: search }, { id: search }] };
+    }
+    // ipHash exists for rate limiting, not the admin UI.
+    return adminPaginatedList('comments', query, { ipHash: 0 }, limit, offset, sort);
+};
+
 const adminGetStats = () => Promise.all([
     getMongoCollection('users').then(c => c.countDocuments({})),
     getMongoCollection('users').then(c => c.countDocuments({ verified: true })),
@@ -834,9 +852,9 @@ const setAssetNsfw = (assetId, nsfw) => new Promise((resolve, reject) => {
 // Game comments. displayName is denormalized at write time (display names are
 // immutable). Anonymous comments have userId/displayName null and carry only a
 // hashed source IP, used to enforce the anonymous limit here in Mongo rather
-// than in memory — a 2-hour window has to survive process restarts (same
+// than in memory — an hour-long window has to survive process restarts (same
 // approach as createSupportMessage).
-const ANON_COMMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+const ANON_COMMENT_WINDOW_MS = 60 * 60 * 1000;
 
 const createComment = ({ gameId, text, userId, displayName, sourceIp }) => new Promise((resolve, reject) => {
     getMongoCollection('comments').then((collection) => {
@@ -863,10 +881,10 @@ const createComment = ({ gameId, text, userId, displayName, sourceIp }) => new P
             insert();
             return;
         }
-        // Anonymous: one comment per 2 hours per IP, across all games.
+        // Anonymous: one comment per hour per IP, across all games.
         collection.countDocuments({ ipHash: hashValue(sourceIp), created: { '$gte': now - ANON_COMMENT_WINDOW_MS } }).then((recentCount) => {
             if (recentCount >= 1) {
-                reject({ type: 'TOO_MANY_COMMENTS', message: 'Anonymous commenting is limited to one comment every 2 hours' });
+                reject({ type: 'TOO_MANY_COMMENTS', message: 'Anonymous commenting is limited to one comment per hour' });
             } else {
                 insert();
             }
@@ -874,18 +892,22 @@ const createComment = ({ gameId, text, userId, displayName, sourceIp }) => new P
     }).catch(reject);
 });
 
-// Newest 100 — enough for v1; add pagination if any game outgrows it.
-const listComments = (gameId) => new Promise((resolve, reject) => {
+const listComments = (gameId, limit, offset) => new Promise((resolve, reject) => {
     getMongoCollection('comments').then((collection) => {
-        collection.find({ gameId }).sort({ created: -1 }).limit(100).toArray().then((comments) => {
-            resolve(comments.map(c => ({
-                id: c.id,
-                gameId: c.gameId,
-                text: c.text,
-                displayName: c.displayName,
-                userId: c.userId || null,
-                created: c.created,
-            })));
+        collection.countDocuments({ gameId }).then((total) => {
+            collection.find({ gameId }).sort({ created: -1 }).skip(offset).limit(limit).toArray().then((comments) => {
+                resolve({
+                    total,
+                    comments: comments.map(c => ({
+                        id: c.id,
+                        gameId: c.gameId,
+                        text: c.text,
+                        displayName: c.displayName,
+                        userId: c.userId || null,
+                        created: c.created,
+                    })),
+                });
+            }).catch(reject);
         }).catch(reject);
     }).catch(reject);
 });
@@ -905,6 +927,8 @@ module.exports = {
     listComments,
     getComment,
     deleteComment,
+    adminListComments,
+    getAssetFileSizes,
     adminListUsers,
     adminListGames,
     adminListAllAssets,
