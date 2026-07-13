@@ -2169,7 +2169,9 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
             .toArray()
             .then(requests => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ requests: requests.map(project) }));
+                // Results are committed to the repo on completion, so the list
+                // (polled by the studio) doesn't carry the source blobs.
+                res.end(JSON.stringify({ requests: requests.map(r => ({ ...project(r), result: undefined })) }));
             })
             .catch(() => {
                 res.writeHead(500);
@@ -2182,8 +2184,68 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
 };
 
 // ---------------------------------------------------------------------------
+// Cancel an in-flight LLM request. The queued job itself isn't recalled — the
+// worker still runs it — but the record goes CANCELLED, so the result posted
+// back later matches nothing in-flight and is discarded without committing.
+// ---------------------------------------------------------------------------
+
+const handleCancelLLMRequest = (req, res, userId, gameId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const requestId = body.id;
+        if (!requestId) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'id is required' }));
+            return;
+        }
+
+        getGame(gameId).then(game => {
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'Not your game' }));
+                return;
+            }
+
+            getMongoCollection('llmRequests').then(collection => {
+                collection.updateOne(
+                    { requestId, gameId, status: { $in: ['PENDING', 'PROCESSING'] } },
+                    { '$set': { status: 'CANCELLED', completedAt: Date.now() } }
+                ).then(r => {
+                    if (r.matchedCount === 0) {
+                        res.writeHead(409);
+                        res.end(JSON.stringify({ error: 'Request is not in progress' }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
+                }).catch(() => {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Database error' }));
+                });
+            }).catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
+    });
+};
+
+// ---------------------------------------------------------------------------
 // Result ingestion from the self-hosted MLX worker.
 // Authenticated with the shared LLM_WORKER_SECRET, not a user JWT.
+// A COMPLETED result is committed to the game's repo as a new version before
+// the record is marked done — the user's prompt is the commit message, so the
+// version history reads as what they asked for. The studio locks the editor
+// while a request is open, so committing over HEAD is safe.
 // ---------------------------------------------------------------------------
 
 const handleLLMResult = (req, res) => {
@@ -2217,25 +2279,66 @@ const handleLLMResult = (req, res) => {
         }
 
         getMongoCollection('llmRequests').then(collection => {
-            const update = { status, completedAt: Date.now() };
-            if (status === 'COMPLETED') update.result = result;
-            if (status === 'FAILED') update.error = error || 'Unknown error';
-
-            collection.updateOne(
-                { requestId, status: { $in: ['PENDING', 'PROCESSING'] } },
-                { '$set': update }
-            ).then(r => {
-                if (r.matchedCount === 0) {
+            // Only in-flight requests accept a result: a job the user cancelled
+            // (or a duplicate delivery) matches nothing and is discarded.
+            const finish = (update, done) => {
+                collection.updateOne(
+                    { requestId, status: { $in: ['PENDING', 'PROCESSING'] } },
+                    { '$set': { ...update, completedAt: Date.now() } }
+                ).then(r => done(null, r.matchedCount > 0)).catch(dbErr => done(dbErr));
+            };
+            const respond = (dbErr, matched) => {
+                if (dbErr) {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Database error' }));
+                } else if (!matched) {
                     res.writeHead(404);
                     res.end(JSON.stringify({ error: 'No in-flight request with that id' }));
-                    return;
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true }));
                 }
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true }));
-            }).catch(() => {
-                res.writeHead(500);
-                res.end(JSON.stringify({ error: 'Database error' }));
-            });
+            };
+
+            if (status === 'FAILED') {
+                finish({ status: 'FAILED', error: error || 'Unknown error' }, respond);
+                return;
+            }
+
+            collection.findOne({ requestId, status: { $in: ['PENDING', 'PROCESSING'] } }).then(record => {
+                if (!record) { respond(null, false); return; }
+
+                getGame(record.gameId).then(game => {
+                    if (!game.forgejoRepo) {
+                        finish({ status: 'FAILED', result, error: 'Game has no repository' }, respond);
+                        return;
+                    }
+                    const [owner, repo] = game.forgejoRepo.split('/');
+                    // The update API needs the file's sha at HEAD (not
+                    // record.baseSha), and index.js may not exist yet for a
+                    // CREATE-mode game — null sha means "create it".
+                    getFileContents(owner, repo, 'index.js')
+                        .then(fileData => fileData.sha)
+                        .catch(() => null)
+                        .then(sha => createOrUpdateFile(owner, repo, 'index.js', result, record.prompt, sha))
+                        .then(commitResult => {
+                            // A cancel that races the commit leaves the record
+                            // CANCELLED with the commit already landed; the user
+                            // can restore the previous version.
+                            finish({
+                                status: 'COMPLETED',
+                                result,
+                                commitSha: commitResult?.commit?.sha || null,
+                            }, respond);
+                        })
+                        .catch(commitErr => {
+                            console.error(`Failed to commit LLM result for ${requestId}`, commitErr);
+                            finish({ status: 'FAILED', result, error: 'The AI edit finished but saving it failed' }, respond);
+                        });
+                }).catch(() => {
+                    finish({ status: 'FAILED', result, error: 'Game not found' }, respond);
+                });
+            }).catch(dbErr => respond(dbErr));
         }).catch(() => {
             res.writeHead(500);
             res.end(JSON.stringify({ error: 'Database error' }));
@@ -2263,6 +2366,7 @@ module.exports = {
     handleSetGameThumbnail,
     handleSubmitLLMRequest,
     handleGetLLMStatus,
+    handleCancelLLMRequest,
     handleLLMResult,
 };
 

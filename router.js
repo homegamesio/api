@@ -89,6 +89,7 @@ const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
 const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
 const studioLLMModifyRegex = '/studio/games/(\\S*)/llm-modify';
 const studioLLMStatusRegex = '/studio/games/(\\S*)/llm-status';
+const studioLLMCancelRegex = '/studio/games/(\\S*)/llm-cancel';
 const llmResultRegex = '/internal/llm-result';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
@@ -199,6 +200,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioSetThumbnailRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSetGameThumbnail },
         [studioPublishRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitPublishRequest },
         [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
+        [studioLLMCancelRegex]: { requiresAuth: true, handle: s.handleCancelLLMRequest },
         [llmResultRegex]: { handle: s.handleLLMResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [gamePlayCountRegex]: { handle: h.handleCountPlay },
