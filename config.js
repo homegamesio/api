@@ -47,6 +47,13 @@ const FORGEJO_WEBHOOK_SECRET = process.env.FORGEJO_WEBHOOK_SECRET || '';
 const API_PUBLIC_URL = process.env.API_PUBLIC_URL || 'http://localhost:80';
 const HOMENAMES_URL = process.env.HOMENAMES_URL || 'http://localhost:7400';
 
+// Shared secret for internal-only Homenames session endpoints (teardown,
+// persistence toggle). Presented as a Bearer token on behalf of an
+// authenticated admin — NOT a user JWT, and never sent to the browser. Must
+// match HOMENAMES_API_SECRET on the core/Homenames side. When empty, Homenames
+// leaves those endpoints ungated (local/LAN dev).
+const HOMENAMES_API_SECRET = process.env.HOMENAMES_API_SECRET || '';
+
 // Public URL of the website (homegamesio) — used to build links in emails and
 // to redirect to after email verification.
 const WEB_PUBLIC_URL = process.env.WEB_PUBLIC_URL || 'http://localhost:80';
@@ -85,6 +92,7 @@ module.exports = {
     FORGEJO_WEBHOOK_SECRET,
     API_PUBLIC_URL,
     HOMENAMES_URL,
+    HOMENAMES_API_SECRET,
     WEB_PUBLIC_URL,
     SES_REGION,
     SES_FROM_ADDRESS,

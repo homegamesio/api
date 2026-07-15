@@ -1473,6 +1473,82 @@ const handleCreateSession = (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// Admin: running-session view + persistence toggle
+//
+// The browser must NOT hit Homenames directly for these — the persistence
+// toggle is gated by the shared secret, which lives only in server env. The
+// API authenticates the admin (requireAdmin) and forwards with the secret.
+// ---------------------------------------------------------------------------
+
+// Proxy a request to Homenames, attaching the shared secret. Resolves
+// { statusCode, body } (body is the raw string).
+const homenamesRequest = (method, pathname, bodyObj) => new Promise((resolve, reject) => {
+    const { HOMENAMES_URL, HOMENAMES_API_SECRET } = require('./config');
+    const target = new URL(pathname, HOMENAMES_URL);
+    const mod = target.protocol === 'https:' ? require('https') : require('http');
+    const payload = bodyObj !== undefined ? JSON.stringify(bodyObj) : null;
+    const headers = {};
+    if (payload !== null) {
+        headers['Content-Type'] = 'application/json';
+        headers['Content-Length'] = Buffer.byteLength(payload);
+    }
+    if (HOMENAMES_API_SECRET) headers['Authorization'] = `Bearer ${HOMENAMES_API_SECRET}`;
+
+    const hnReq = mod.request({
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method,
+        headers,
+        rejectUnauthorized: false, // Homenames cert is for the public domain, not the internal host
+    }, (hnRes) => {
+        let data = '';
+        hnRes.on('data', (chunk) => { data += chunk; });
+        hnRes.on('end', () => resolve({ statusCode: hnRes.statusCode, body: data }));
+    });
+    hnReq.on('error', reject);
+    hnReq.setTimeout(8000, () => { hnReq.destroy(); reject(new Error('Homenames request timed out')); });
+    if (payload !== null) hnReq.write(payload);
+    hnReq.end();
+});
+
+const handleAdminListSessions = (req, res, userId) =>
+    requireAdmin(userId, res, () => {
+        homenamesRequest('GET', '/sessions').then(({ statusCode, body }) => {
+            let parsed;
+            try { parsed = JSON.parse(body); } catch (e) { parsed = { sessions: [] }; }
+            // The admin table expects { items }. Homenames returns { sessions }.
+            const sessions = (parsed && parsed.sessions) || [];
+            res.writeHead(statusCode >= 200 && statusCode < 300 ? 200 : statusCode,
+                { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ items: sessions, count: sessions.length }));
+        }).catch(err => {
+            console.error('[admin] list sessions failed:', err.message);
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to reach game server' }));
+        });
+    });
+
+const handleAdminSetSessionPersistent = (req, res, userId, sessionId) =>
+    requireAdmin(userId, res, () => {
+        getReqBody(req, (_body, err) => {
+            if (err) { res.writeHead(400); res.end(JSON.stringify({ error: 'Error reading request' })); return; }
+            let body;
+            try { body = JSON.parse(_body); } catch (e) { body = {}; }
+            const persistent = !!body.persistent;
+            homenamesRequest('POST', `/sessions/${encodeURIComponent(sessionId)}/persistent`, { persistent })
+                .then(({ statusCode, body: respBody }) => {
+                    res.writeHead(statusCode || 500, { 'Content-Type': 'application/json' });
+                    res.end(respBody || JSON.stringify({ id: sessionId, persistent }));
+                }).catch(errr => {
+                    console.error('[admin] set session persistent failed:', errr.message);
+                    res.writeHead(502, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Failed to reach game server' }));
+                });
+        });
+    });
+
+// ---------------------------------------------------------------------------
 // Get published versions for a game (for the version dropdown in "Try it")
 // ---------------------------------------------------------------------------
 
@@ -1649,6 +1725,7 @@ module.exports = {
     handleAdminListFailedPublishRequests, handleHealth,
     handleAdminListUsers, handleAdminListGames, handleAdminListAssets,
     handleAdminStats, handleAdminSetAssetNsfw,
+    handleAdminListSessions, handleAdminSetSessionPersistent,
     handleCreateSession, handleGetPublishedVersions,
     handleRefreshToken, handleUpdateAssetTags, handleUpdateAssetMeta,
     handleListPublicAssets,

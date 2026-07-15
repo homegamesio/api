@@ -19,6 +19,8 @@ const adminAssetsRegex = '/admin/assets';
 const adminCommentsRegex = '/admin/comments';
 const adminStatsRegex = '/admin/stats';
 const adminAssetNsfwRegex = '/admin/assets/(\\S*)/nsfw';
+const adminSessionsRegex = '/admin/sessions';
+const adminSessionPersistentRegex = '/admin/sessions/(\\S*)/persistent';
 const assetsListRegex = '/assets';
 const publicAssetsCatalogRegex = '/catalog/assets';
 const verifyPublishRequestRegex = '/verify_publish_request';
@@ -210,6 +212,7 @@ const buildRequestHandlers = (h, s) => ({
         [webhookPushRegex]: { handle: s.handleWebhookPush },
         [toggleFeaturedRegex]: { requiresAuth: true, handle: s.handleToggleFeatured },
         [adminAssetNsfwRegex]: { requiresAuth: true, handle: h.handleAdminSetAssetNsfw },
+        [adminSessionPersistentRegex]: { requiresAuth: true, handle: h.handleAdminSetSessionPersistent },
     },
     'GET': {
         [meRegex]: { requiresAuth: true, handle: h.handleMe },
@@ -218,6 +221,7 @@ const buildRequestHandlers = (h, s) => ({
         [adminAssetsRegex]: { requiresAuth: true, handle: h.handleAdminListAssets },
         [adminCommentsRegex]: { requiresAuth: true, handle: h.handleAdminListComments },
         [adminStatsRegex]: { requiresAuth: true, handle: h.handleAdminStats },
+        [adminSessionsRegex]: { requiresAuth: true, handle: h.handleAdminListSessions },
         [mapRegex]: { handle: h.handleGetMap },
         [certStatusRegex]: { handle: h.handleGetCertStatus },
         [assetsRegex]: { handle: h.handleGetAsset },
