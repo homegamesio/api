@@ -1944,6 +1944,13 @@ const handleGetPublishStatuses = (req, res, userId, gameId) => {
 // ---------------------------------------------------------------------------
 
 const handleSubmitLLMRequest = (req, res, userId, gameId) => {
+    const { AI_EDITS_ENABLED } = require('./config');
+    if (!AI_EDITS_ENABLED) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'AI game editing is currently disabled' }));
+        return;
+    }
+
     getReqBody(req, (_body, err) => {
         if (err) { res.writeHead(400); res.end('Error reading request'); return; }
 

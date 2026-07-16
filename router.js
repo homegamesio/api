@@ -1,5 +1,6 @@
 const { verifyToken } = require('./crypto');
 const { getUserRecord } = require('./db');
+const d = require('./docs-assistant');
 
 // Route regex patterns
 const publishRequestsRegex = '/games/(\\S*)/publish_requests';
@@ -93,6 +94,9 @@ const studioLLMModifyRegex = '/studio/games/(\\S*)/llm-modify';
 const studioLLMStatusRegex = '/studio/games/(\\S*)/llm-status';
 const studioLLMCancelRegex = '/studio/games/(\\S*)/llm-cancel';
 const llmResultRegex = '/internal/llm-result';
+const docsAskRegex = '/docs/ask';
+const docsAskStatusRegex = '/docs/ask/(\\S*)';
+const docsAnswerRegex = '/internal/docs-answer';
 const webhookPushRegex = '/webhook/push';
 const toggleFeaturedRegex = '/admin/games/(\\S*)/feature';
 const deleteDeveloperRegex = '/admin/developers/(\\S*)';
@@ -204,6 +208,10 @@ const buildRequestHandlers = (h, s) => ({
         [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
         [studioLLMCancelRegex]: { requiresAuth: true, handle: s.handleCancelLLMRequest },
         [llmResultRegex]: { handle: s.handleLLMResult },
+        // Docs assistant: public ask + worker result callback (the handler
+        // verifies LLM_WORKER_SECRET itself, like /internal/llm-result).
+        [docsAskRegex]: { handle: d.handleAskDocs },
+        [docsAnswerRegex]: { handle: d.handleDocsAnswerResult },
         [createSessionRegex]: { handle: h.handleCreateSession },
         [gamePlayCountRegex]: { handle: h.handleCountPlay },
         // No requiresAuth: comments accept optional auth (anonymous allowed);
@@ -251,6 +259,7 @@ const buildRequestHandlers = (h, s) => ({
         [adminListPendingPublishRequestsRegex]: { requiresAuth: true, handle: h.handleAdminListPendingPublishRequests },
         [adminListFailedPublishRequestsRegex]: { requiresAuth: true, handle: h.handleAdminListFailedPublishRequests },
         [healthRegex]: { handle: h.handleHealth },
+        [docsAskStatusRegex]: { handle: d.handleGetDocsAnswer },
         [studioGetVersionFilesRegex]: { requiresAuth: true, handle: s.handleGetVersionFiles },
         [studioGetFilesRegex]: { requiresAuth: true, handle: s.handleGetFiles },
         [studioGetFileContentRegex]: { requiresAuth: true, handle: s.handleGetFileContent },

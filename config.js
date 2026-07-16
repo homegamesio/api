@@ -9,9 +9,19 @@ const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 // handleSubmitLLMRequest). Kept only to avoid breaking any external reference;
 // nothing in this codebase publishes here anymore.
 
-// Shared secret the self-hosted MLX worker uses to post results back to the
+// Shared secret the self-hosted LLM worker uses to post results back to the
 // API. NOT a user JWT — this authenticates the worker, not a person.
 const LLM_WORKER_SECRET = process.env.LLM_WORKER_SECRET || '';
+
+// AI "modify my game" edits. Off by default: locally-hosted models aren't
+// good/fast enough for full game generation yet. The studio UI is gated by
+// its own AI_FEATURES_ENABLED flag; this gates the endpoint itself.
+const AI_EDITS_ENABLED = process.env.AI_EDITS_ENABLED === 'true';
+
+// The docs "ask something" assistant (general Q&A about Homegames grounded in
+// the knowledge doc — answered by the same LLM worker, never generates games).
+// On by default; set DOCS_ASSISTANT_ENABLED=false to turn the endpoint off.
+const DOCS_ASSISTANT_ENABLED = process.env.DOCS_ASSISTANT_ENABLED !== 'false';
 
 const CERTS_ENABLED = process.env.CERTS_ENABLED || false;
 
@@ -71,6 +81,8 @@ module.exports = {
     CERT_DOMAIN,
     JOB_QUEUE_NAME,
     LLM_WORKER_SECRET,
+    AI_EDITS_ENABLED,
+    DOCS_ASSISTANT_ENABLED,
     CERTS_ENABLED,
     DB_TYPE,
     AWS_ROUTE_53_HOSTED_ZONE_ID,
