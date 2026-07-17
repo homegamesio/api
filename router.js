@@ -86,7 +86,7 @@ const studioRestoreVersionRegex = '/studio/games/(\\S*)/restore';
 const studioGetCloneInfoRegex = '/studio/games/(\\S*)/clone';
 const studioGetBuildsRegex = '/studio/games/(\\S*)/builds';
 const studioGetTemplatesRegex = '/studio/templates';
-const studioGetTemplateFilesRegex = '/studio/templates/(\\w+)/files';
+const studioGetTemplateFilesRegex = '/studio/templates/([\\w-]+)/files';
 const studioPublishRegex = '/studio/games/(\\S*)/publish';
 const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
 const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
@@ -111,9 +111,12 @@ const dispatchRequest = (req, res, requestHandlers) => {
     } else {
         // sort with largest values upfront to get the most specific match
         const matchers = Object.keys(requestHandlers[req.method]).sort((a, b) => b.length - a.length);
+        // match against the path only, anchored, so a failed specific match
+        // can't fall through to a shorter substring match
+        const path = req.url.split('?')[0];
         let matched = null;
         for (let i = 0; i < matchers.length; i++) {
-            matched = req.url.match(new RegExp(matchers[i]));
+            matched = path.match(new RegExp('^' + matchers[i] + '$'));
             if (matched) {
                 const matchedParams = [];
                 for (let j = 1; j < matched.length; j++) {

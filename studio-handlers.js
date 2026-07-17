@@ -641,7 +641,8 @@ module.exports = MyGame;
         label: "Scrolling World",
         description: "Pan a camera around a world larger than the screen.",
         files: {
-            'index.js': `const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils } = require('squish-142');
+            'index.js': 
+`const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils, Asset } = require('squish-142');
 const COLORS = Colors.COLORS;
 
 // A world larger than the screen; each player pans their own camera with
@@ -652,7 +653,10 @@ class MyGame extends ViewableGame {
             aspectRatio: { x: 16, y: 9 },
             squishVersion: '142',
             author: 'Unknown',
-            description: 'Scroll a camera around a large world with WASD'
+            description: 'Scroll a camera around a large world with WASD',
+            assets: {
+              'fella': new Asset({ id: 'f6f6df5eb5daa2313485a543679e5b38', type: 'image' })
+            }
         };
     }
 
@@ -682,6 +686,15 @@ class MyGame extends ViewableGame {
                 }));
             }
         }
+
+        const image = new GameNode.Asset({
+        coordinates2d: ShapeUtils.rectangle(150, 150, 40, 40),
+          assetInfo: {
+            'fella': { pos: { x: 150, y: 150 }, size: { x: 40, y: 40 } }
+          }
+        });
+        
+        worldBase.addChild(image);
 
         this.getPlane().addChild(worldBase);
     }
