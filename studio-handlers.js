@@ -1653,7 +1653,12 @@ const handleToggleFeatured = (req, res, userId, gameId) => {
                 }
 
                 const newFeatured = !game.featured;
-                collection.updateOne({ gameId }, { '$set': { featured: newFeatured } }).then(() => {
+                // featuredAt drives the front page's "most recently featured"
+                // ordering; re-featuring a game bumps it back to the top.
+                const update = newFeatured
+                    ? { '$set': { featured: true, featuredAt: Date.now() } }
+                    : { '$set': { featured: false }, '$unset': { featuredAt: '' } };
+                collection.updateOne({ gameId }, update).then(() => {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ gameId, featured: newFeatured }));
                 }).catch(err => {

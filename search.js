@@ -44,8 +44,12 @@ const listGames = (limit = 6, offset = 0, sort = null, query = null, featured = 
 
                 gameCollection.countDocuments(dbQuery).then(total => {
                     const pageCount = Math.ceil(total / limit);
+                    // Featured listings order by when the admin featured the
+                    // game, newest first. Games featured before featuredAt
+                    // existed have no timestamp and sort after, by creation.
+                    const sortOrder = featured ? { featuredAt: -1, created: -1 } : { created: -1 };
                     gameCollection.find(dbQuery)
-                        .sort({ created: -1 })
+                        .sort(sortOrder)
                         .skip(Number(offset))
                         .limit(Number(limit))
                         .toArray()
@@ -129,6 +133,7 @@ const mapGame = (game) => ({
     created: game.created,
     thumbnail: game.thumbnail,
     featured: game.featured || false,
+    featuredAt: game.featuredAt || null,
     nsfw: !!game.nsfw,
     // Play capabilities captured at publish time. null multiplayer = published
     // before these were recorded (and not yet backfilled) — no inline play UI.

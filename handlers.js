@@ -1371,6 +1371,9 @@ const handleCreateSession = (req, res) => {
         }
 
         const { gameId, commitSha } = body;
+        // "private" here means unlisted — Homenames keeps the session out of
+        // its public GET /sessions listing; joining by link still works.
+        const isPrivate = body.private === true;
         if (!gameId) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'gameId is required' }));
@@ -1419,6 +1422,7 @@ const handleCreateSession = (req, res) => {
                     gameId,
                     commitSha: sha,
                     gameKey: game.name || gameId,
+                    private: isPrivate,
                 });
 
                 const homenamesReq = http.request({
@@ -1441,6 +1445,7 @@ const handleCreateSession = (req, res) => {
                                 gameId,
                                 commitSha: sha,
                                 created: Date.now(),
+                                private: isPrivate,
                             })).catch(statErr => console.error('[sessions] stat write failed:', statErr.message));
 
                             res.writeHead(200, { 'Content-Type': 'application/json' });
