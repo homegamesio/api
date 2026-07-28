@@ -1179,12 +1179,22 @@ const handleSaveVersion = (req, res, userId, gameId) => {
             return;
         }
 
-        const { files, message } = body;
+        const { files, message, deletions } = body;
         // files: [{ path, content, sha (if updating existing) }]
+        // deletions: [{ path, sha }] — removals (e.g. file moves), applied after writes
 
-        if (!files || !Array.isArray(files) || files.length === 0) {
+        const fileList = Array.isArray(files) ? files : [];
+        const deleteList = Array.isArray(deletions) ? deletions : [];
+
+        if (fileList.length === 0 && deleteList.length === 0) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'files array is required' }));
+            return;
+        }
+
+        if (deleteList.some(d => !d || !d.path || !d.sha)) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'deletions require path and sha' }));
             return;
         }
 
@@ -1203,25 +1213,48 @@ const handleSaveVersion = (req, res, userId, gameId) => {
 
             ensureForgejoUser(userId).then(() => {
                 const [owner, repo] = game.forgejoRepo.split('/');
-                const commitMessage = message || `Update ${files.length} file(s)`;
+                const commitMessage = message || `Update ${fileList.length + deleteList.length} file(s)`;
 
-                // Commit files sequentially (Forgejo API does one file per request)
-                const committedFiles = [];
-                const commitNext = (index) => {
-                    if (index >= files.length) {
-                        // All files committed — the webhook will handle build triggering
+                // Deletions run after writes so a moved file exists at its new
+                // path before the old path is removed.
+                const deleteNext = (index) => {
+                    if (index >= deleteList.length) {
+                        // All done — the webhook will handle build triggering
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({
                             success: true,
-                            filesCommitted: files.length,
+                            filesCommitted: fileList.length,
+                            filesDeleted: deleteList.length,
                             message: commitMessage,
                             files: committedFiles,
                         }));
                         return;
                     }
 
-                    const file = files[index];
-                    const fileMessage = index === 0 ? commitMessage : `${commitMessage} (${index + 1}/${files.length})`;
+                    const del = deleteList[index];
+                    deleteFile(owner, repo, del.path, del.sha, `${commitMessage} (delete ${del.path})`)
+                        .then(() => deleteNext(index + 1))
+                        .catch(err => {
+                            console.error(`Failed to delete file ${del.path}`, err);
+                            res.writeHead(500);
+                            res.end(JSON.stringify({
+                                error: `Failed to delete file: ${del.path}`,
+                                filesCommitted: fileList.length,
+                                filesDeleted: index,
+                            }));
+                        });
+                };
+
+                // Commit files sequentially (Forgejo API does one file per request)
+                const committedFiles = [];
+                const commitNext = (index) => {
+                    if (index >= fileList.length) {
+                        deleteNext(0);
+                        return;
+                    }
+
+                    const file = fileList[index];
+                    const fileMessage = index === 0 ? commitMessage : `${commitMessage} (${index + 1}/${fileList.length})`;
 
                     createOrUpdateFile(owner, repo, file.path, file.content, fileMessage, file.sha)
                         .then(result => {

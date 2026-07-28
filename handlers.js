@@ -695,6 +695,7 @@ const handleMe = (req, res, userId) => {
         res.end(JSON.stringify({
             userId: user.userId,
             displayName: user.displayName,
+            email: user.email,
             verified: !!user.verified,
             isAdmin: !!user.isAdmin,
         }));
