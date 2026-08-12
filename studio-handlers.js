@@ -2212,8 +2212,32 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
                     res.end(JSON.stringify({ error: 'Request not found' }));
                     return;
                 }
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ request: project(r) }));
+                const respond = (queue) => {
+                    const request = project(r);
+                    if (queue) request.queue = queue;
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ request }));
+                };
+                if (r.status !== 'PENDING' && r.status !== 'PROCESSING') {
+                    respond(null);
+                    return;
+                }
+                // Queue snapshot for open requests (drives the studio's
+                // robots-in-line animation): pending edits ahead of/behind this
+                // one across all games — one worker pool — plus how many the
+                // worker is chewing on right now. Best-effort: counting
+                // failures just omit the snapshot.
+                Promise.all([
+                    collection.countDocuments({ status: 'PENDING', created: { $lt: r.created } }),
+                    collection.countDocuments({ status: 'PENDING', created: { $gt: r.created } }),
+                    collection.countDocuments({ status: 'PROCESSING' }),
+                ]).then(([ahead, behind, processing]) => {
+                    respond({
+                        ahead: r.status === 'PENDING' ? ahead : 0,
+                        behind,
+                        processing: r.status === 'PROCESSING' ? Math.max(0, processing - 1) : processing,
+                    });
+                }).catch(() => respond(null));
             }).catch(() => {
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: 'Database error' }));
