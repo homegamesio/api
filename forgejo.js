@@ -127,6 +127,12 @@ const deleteRepo = (owner, repo) => {
     return forgejoRequest('DELETE', `/repos/${owner}/${repo}`, null, { sudo: owner });
 };
 
+// Forgejo keeps a redirect from the old repo name, so existing clones and
+// remotes keep working after a rename. Webhooks stay attached to the repo.
+const renameRepo = (owner, repo, newName) => {
+    return forgejoRequest('PATCH', `/repos/${owner}/${repo}`, { name: newName }, { sudo: owner });
+};
+
 // Delete a Forgejo user account. purge=true removes any repos they still own,
 // so this works even if per-repo cleanup missed something.
 const deleteForgejoUser = (username) => {
@@ -243,6 +249,7 @@ module.exports = {
     createRepo,
     createWebhook,
     deleteRepo,
+    renameRepo,
     deleteForgejoUser,
     getFileTree,
     getFileContents,

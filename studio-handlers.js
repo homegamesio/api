@@ -9,7 +9,7 @@ const {
 } = require('./db');
 
 const {
-    createRepo, createWebhook, getFileTree, getFileContents,
+    createRepo, createWebhook, renameRepo, getFileTree, getFileContents,
     createOrUpdateFile, deleteFile, listCommits, getRepoInfo,
     createForgejoUser, adminEditUser,
     FORGEJO_USER_SECRET,
@@ -939,6 +939,11 @@ const isUnmodifiedStarterTemplate = (source) =>
 // Game creation (with Forgejo repo)
 // ---------------------------------------------------------------------------
 
+// A game's repo slug is always derived from its display name with this rule —
+// creation and rename must agree, or renames drift from what creation allows.
+const slugifyRepoName = (name) =>
+    name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+
 const handleStudioCreateGame = (req, res, userId) => {
     getReqBody(req, (_body, err) => {
         if (err) {
@@ -970,7 +975,7 @@ const handleStudioCreateGame = (req, res, userId) => {
             return;
         }
 
-        const repoName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        const repoName = slugifyRepoName(name);
         if (!repoName) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'Invalid game name' }));
@@ -1058,6 +1063,100 @@ const handleStudioCreateGame = (req, res, userId) => {
             console.error('Failed to ensure Forgejo account', err);
             res.writeHead(500);
             res.end(JSON.stringify({ error: typeof err === 'string' ? err : 'Failed to set up development account' }));
+        });
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Game rename — display name and Forgejo repo slug move together, so the UI
+// never shows a name whose slug is still claimed by the old repo.
+// ---------------------------------------------------------------------------
+
+const handleRenameGame = (req, res, userId, gameId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) {
+            res.writeHead(400);
+            res.end('Error reading request');
+            return;
+        }
+
+        let body;
+        try {
+            body = JSON.parse(_body);
+        } catch (e) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            return;
+        }
+
+        const name = body.name && String(body.name).trim();
+        if (!name) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Game name is required' }));
+            return;
+        }
+
+        const newRepoName = slugifyRepoName(name);
+        if (!newRepoName) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Invalid game name' }));
+            return;
+        }
+
+        getGame(gameId).then(game => {
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'You cannot modify a game that you didnt create' }));
+                return;
+            }
+            if (!game.forgejoRepo) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Game has no repository' }));
+                return;
+            }
+
+            const [owner, oldRepoName] = game.forgejoRepo.split('/');
+
+            const applyMongo = (forgejoRepo) => getMongoCollection('games')
+                .then(collection => collection.updateOne({ gameId }, { $set: { name, forgejoRepo } }));
+
+            const respondOk = (forgejoRepo) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ id: gameId, name, forgejoRepo }));
+            };
+
+            if (newRepoName === oldRepoName) {
+                // Same slug (e.g. capitalization change) — no repo rename needed.
+                applyMongo(game.forgejoRepo).then(() => respondOk(game.forgejoRepo)).catch(dbErr => {
+                    console.error('Failed to update game name', dbErr);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to rename game' }));
+                });
+                return;
+            }
+
+            renameRepo(owner, oldRepoName, newRepoName).then(() => {
+                const newFullName = `${owner}/${newRepoName}`;
+                applyMongo(newFullName).then(() => respondOk(newFullName)).catch(dbErr => {
+                    // The push webhook looks games up by forgejoRepo, so a repo
+                    // renamed in Forgejo but not in Mongo orphans future builds.
+                    // Rename the repo back rather than leave the two out of sync.
+                    console.error('Game record update failed after repo rename; rolling back', dbErr);
+                    renameRepo(owner, newRepoName, oldRepoName).catch(rollbackErr => {
+                        console.error(`CRITICAL: rollback failed for game ${gameId} — repo is ${owner}/${newRepoName} but Mongo still has ${game.forgejoRepo}`, rollbackErr);
+                    });
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to rename game' }));
+                });
+            }).catch(fgErr => {
+                const taken = fgErr && (fgErr.status === 409 || fgErr.status === 422);
+                if (!taken) console.error('Forgejo repo rename failed', fgErr);
+                res.writeHead(taken ? 400 : 500);
+                res.end(JSON.stringify({ error: taken ? 'You already have a game with that name' : 'Failed to rename game' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
         });
     });
 };
@@ -2430,6 +2529,7 @@ const handleLLMResult = (req, res) => {
 
 module.exports = {
     handleStudioCreateGame,
+    handleRenameGame,
     handleGetTemplates,
     handleGetTemplateFiles,
     handleGetFiles,
