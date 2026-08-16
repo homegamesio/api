@@ -91,6 +91,7 @@ const studioPublishRegex = '/studio/games/(\\S*)/publish';
 const studioPublishStatusRegex = '/studio/games/(\\S*)/publish-status';
 const studioSetThumbnailRegex = '/studio/games/(\\S*)/thumbnail';
 const studioRenameGameRegex = '/studio/games/(\\S*)/rename';
+const studioArchiveGameRegex = '/studio/games/(\\S*)/archive';
 const studioLLMModifyRegex = '/studio/games/(\\S*)/llm-modify';
 const studioLLMStatusRegex = '/studio/games/(\\S*)/llm-status';
 const studioLLMCancelRegex = '/studio/games/(\\S*)/llm-cancel';
@@ -209,6 +210,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioRestoreVersionRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleRestoreVersion },
         [studioSetThumbnailRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSetGameThumbnail },
         [studioRenameGameRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleRenameGame },
+        [studioArchiveGameRegex]: { requiresAuth: true, handle: s.handleArchiveGame },
         [studioPublishRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitPublishRequest },
         [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
         [studioLLMCancelRegex]: { requiresAuth: true, handle: s.handleCancelLLMRequest },

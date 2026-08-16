@@ -1810,27 +1810,104 @@ const handleToggleFeatured = (req, res, userId, gameId) => {
 // ---------------------------------------------------------------------------
 
 const handleStudioListGames = (req, res, userId) => {
+    const queryObject = url.parse(req.url, true).query;
+    const page = Math.max(1, parseInt(queryObject.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(queryObject.limit, 10) || 20));
+    const search = (queryObject.q || '').trim();
+    // Archived games are hidden unless explicitly requested; `archived` may be
+    // missing on old records, so the default filter matches "not true".
+    const showArchived = queryObject.archived === 'true';
+
+    const query = {
+        developerId: userId,
+        archived: showArchived ? true : { $ne: true },
+    };
+    if (search) {
+        const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        query.name = { $regex: escaped, $options: 'i' };
+    }
+
     getMongoCollection('games').then(collection => {
-        collection.find({ developerId: userId })
-            .sort({ created: -1 })
-            .toArray()
-            .then(games => {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    games: games.map(g => ({
-                        id: g.gameId,
-                        name: g.name,
-                        description: g.description,
-                        forgejoRepo: g.forgejoRepo,
-                        featured: g.featured || false,
-                        created: g.created,
-                        thumbnail: g.thumbnail || null,
-                    })),
-                }));
-            });
+        collection.countDocuments(query).then(total => {
+            collection.find(query)
+                .sort({ created: -1 })
+                .skip((page - 1) * limit)
+                .limit(limit)
+                .toArray()
+                .then(games => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        games: games.map(g => ({
+                            id: g.gameId,
+                            name: g.name,
+                            description: g.description,
+                            forgejoRepo: g.forgejoRepo,
+                            featured: g.featured || false,
+                            created: g.created,
+                            thumbnail: g.thumbnail || null,
+                            archived: g.archived || false,
+                        })),
+                        total,
+                        page,
+                        limit,
+                    }));
+                });
+        });
     }).catch(err => {
         res.writeHead(500);
         res.end(JSON.stringify({ error: 'Failed to list games' }));
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Archive / unarchive — a studio-only organizational flag. Archived games
+// keep their repo and published versions; they're just hidden from the
+// default studio list.
+// ---------------------------------------------------------------------------
+
+const handleArchiveGame = (req, res, userId, gameId) => {
+    getReqBody(req, (_body, err) => {
+        if (err) {
+            res.writeHead(400);
+            res.end('Error reading request');
+            return;
+        }
+
+        let body;
+        try {
+            body = JSON.parse(_body);
+        } catch (e) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            return;
+        }
+
+        const archived = !!body.archived;
+
+        getGame(gameId).then(game => {
+            if (game.developerId !== userId) {
+                res.writeHead(403);
+                res.end(JSON.stringify({ error: 'You cannot modify a game that you didnt create' }));
+                return;
+            }
+
+            getMongoCollection('games').then(collection => {
+                collection.updateOne({ gameId }, { $set: { archived } }).then(() => {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ id: gameId, archived }));
+                }).catch(dbErr => {
+                    console.error('Failed to update archived flag', dbErr);
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: 'Failed to update game' }));
+                });
+            }).catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        }).catch(() => {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'Game not found' }));
+        });
     });
 };
 
@@ -2542,6 +2619,7 @@ module.exports = {
     handleGetBuilds,
     handleToggleFeatured,
     handleStudioListGames,
+    handleArchiveGame,
     handleGetCloneInfo,
     handleSubmitPublishRequest,
     handleGetPublishStatuses,
