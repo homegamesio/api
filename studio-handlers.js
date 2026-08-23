@@ -2165,6 +2165,43 @@ const handleGetPublishStatuses = (req, res, userId, gameId) => {
 };
 
 // ---------------------------------------------------------------------------
+// Stale AI-request sweep. A worker that dies mid-job (or a result POST that
+// never lands) would leave a request in-flight forever — blocking new AI
+// edits for the game (409) and locking the studio editor on every visit.
+// PROCESSING is bounded by the worker's 65-minute job backstop, so anything
+// running much longer than that is lost, not slow. PENDING has no natural
+// upper bound (jobs legitimately queue for hours behind other hour-long
+// generations), so it only gets a deep backstop. A late result for a swept
+// request is discarded by handleLLMResult (it only matches in-flight records).
+// ---------------------------------------------------------------------------
+
+const LLM_PROCESSING_STALE_MS = 90 * 60 * 1000;
+const LLM_PENDING_STALE_MS = 24 * 60 * 60 * 1000;
+
+// Optional image attachments on AI requests ("here's a sketch of the game",
+// "screenshot of the bug"), sent as data URLs and fed to the vision model.
+// The studio downscales before upload; these are the server's own guards.
+const LLM_MAX_IMAGES = 3;
+const LLM_MAX_IMAGE_CHARS = 2 * 1000 * 1000; // ~1.5MB decoded
+const LLM_IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
+// 3 images + prompt fits comfortably; everything else keeps getReqBody's 1MB default.
+const LLM_SUBMIT_MAX_BODY = 8 * 1000 * 1000;
+
+const expireStaleLLMRequests = (collection, gameId) => {
+    const now = Date.now();
+    return collection.updateMany(
+        {
+            gameId,
+            $or: [
+                { status: 'PROCESSING', processingStartedAt: { $lt: now - LLM_PROCESSING_STALE_MS } },
+                { status: 'PENDING', created: { $lt: now - LLM_PENDING_STALE_MS } },
+            ],
+        },
+        { $set: { status: 'FAILED', error: 'The AI request was lost — the worker never finished it. Please try again.', completedAt: now } }
+    );
+};
+
+// ---------------------------------------------------------------------------
 // Submit an LLM "modify my game" request.
 // Fetches the game's current index.js, then enqueues a job containing the
 // source + the user's prompt for the self-hosted MLX worker to process.
@@ -2207,6 +2244,26 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
             return;
         }
 
+        // Opt-in "email me when it's done" checkbox — generation can take up
+        // to an hour, so most users won't sit and watch the queue animation.
+        const emailOnComplete = !!body.emailOnComplete;
+
+        // Optional image attachments. Not stored on the request record (they
+        // can be MBs each) — validated here and carried by the queue message.
+        const images = body.images || [];
+        if (!Array.isArray(images) || images.length > LLM_MAX_IMAGES) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: `images must be an array of at most ${LLM_MAX_IMAGES} data URLs` }));
+            return;
+        }
+        for (const img of images) {
+            if (typeof img !== 'string' || img.length > LLM_MAX_IMAGE_CHARS || !LLM_IMAGE_DATA_URL_RE.test(img)) {
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: 'Each image must be a PNG, JPEG, or WebP data URL under ~1.5MB' }));
+                return;
+            }
+        }
+
         getGame(gameId).then(game => {
             if (!game.forgejoRepo) {
                 res.writeHead(400);
@@ -2226,6 +2283,9 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                     const baseSha = fileData.sha;
 
                     getMongoCollection('llmRequests').then(collection => {
+                        // Sweep lost jobs first so a dead request can't
+                        // 409-block this game forever.
+                        expireStaleLLMRequests(collection, gameId).catch(() => {}).then(() => {
                         // Rate limit: 1 request per 2 minutes per user
                         const twoMinutesAgo = Date.now() - 2 * 60 * 1000;
                         collection.findOne(
@@ -2266,6 +2326,8 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                     created: Date.now(),
                                 };
                                 if (mode) record.mode = mode;
+                                if (emailOnComplete) record.emailOnComplete = true;
+                                if (images.length) record.imageCount = images.length;
 
                                 collection.insertOne(record).then(() => {
                                     const amqp = require('amqplib/callback_api');
@@ -2320,6 +2382,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                                     baseSha,
                                                     source: sourceContent,
                                                     mode,
+                                                    images: images.length ? images : undefined,
                                                 })),
                                                 { persistent: true },
                                                 (confErr) => {
@@ -2342,6 +2405,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                 });
                             });
                         });
+                        });
                     }).catch(() => {
                         res.writeHead(500);
                         res.end(JSON.stringify({ error: 'Database error' }));
@@ -2359,7 +2423,7 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
             res.writeHead(404);
             res.end(JSON.stringify({ error: 'Game not found' }));
         });
-    });
+    }, LLM_SUBMIT_MAX_BODY);
 };
 
 // ---------------------------------------------------------------------------
@@ -2379,8 +2443,12 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
             error: r.error || null,
             created: r.created,
             completedAt: r.completedAt || null,
+            emailOnComplete: !!r.emailOnComplete,
         });
 
+        // Sweep lost jobs first so pollers see FAILED instead of waiting on a
+        // request that will never resolve.
+        expireStaleLLMRequests(collection, gameId).catch(() => {}).then(() => {
         if (id) {
             collection.findOne({ requestId: id, gameId }).then(r => {
                 if (!r) {
@@ -2435,6 +2503,7 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
                 res.writeHead(500);
                 res.end(JSON.stringify({ error: 'Failed to get AI edit statuses' }));
             });
+        });
     }).catch(() => {
         res.writeHead(500);
         res.end(JSON.stringify({ error: 'Database error' }));
@@ -2545,6 +2614,35 @@ const handleLLMResult = (req, res) => {
                     { '$set': { ...update, completedAt: Date.now() } }
                 ).then(r => done(null, r.matchedCount > 0)).catch(dbErr => done(dbErr));
             };
+            // Opt-in "email me when it's done". Fire-and-forget after the
+            // record settles — a mail failure must never fail result
+            // ingestion, and cancelled requests never get here (finish only
+            // matches in-flight records). Re-reads the record so the email
+            // reflects the final status, whichever finish() path set it.
+            const notifyRequester = () => {
+                collection.findOne({ requestId }).then(record => {
+                    if (!record || !record.emailOnComplete) return;
+                    if (record.status !== 'COMPLETED' && record.status !== 'FAILED') return;
+                    Promise.all([
+                        getUserRecord(record.userId),
+                        getGame(record.gameId).catch(() => null),
+                    ]).then(([user, game]) => {
+                        if (!user || !user.email) return;
+                        const { sendGameGeneratedEmail } = require('./email');
+                        sendGameGeneratedEmail(
+                            user.email,
+                            user.displayName,
+                            game && game.name,
+                            record.status === 'COMPLETED',
+                            record.error || null
+                        ).catch(mailErr => {
+                            console.error(`Failed to send game-ready email for ${requestId}`, mailErr);
+                        });
+                    }).catch(lookupErr => {
+                        console.error(`Game-ready email lookup failed for ${requestId}`, lookupErr);
+                    });
+                }).catch(() => {});
+            };
             const respond = (dbErr, matched) => {
                 if (dbErr) {
                     res.writeHead(500);
@@ -2555,6 +2653,7 @@ const handleLLMResult = (req, res) => {
                 } else {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true }));
+                    notifyRequester();
                 }
             };
 
@@ -2604,6 +2703,60 @@ const handleLLMResult = (req, res) => {
     });
 };
 
+// ---------------------------------------------------------------------------
+// Job-started signal from the self-hosted MLX worker: marks the request
+// PROCESSING so the studio's queue view shows "working on your edit" and the
+// stale sweep can tell a running job from one lost in the queue. Best-effort
+// on the worker side — a missed signal just leaves the request PENDING.
+// Authenticated with the shared LLM_WORKER_SECRET, like /internal/llm-result.
+// ---------------------------------------------------------------------------
+
+const handleLLMStarted = (req, res) => {
+    const { LLM_WORKER_SECRET } = require('./config');
+
+    const auth = req.headers.authorization || '';
+    if (!LLM_WORKER_SECRET || auth !== `Bearer ${LLM_WORKER_SECRET}`) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+    }
+
+    getReqBody(req, (_body, err) => {
+        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
+
+        let body;
+        try { body = JSON.parse(_body); } catch (e) {
+            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+        }
+
+        const { requestId } = body;
+        if (!requestId) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'requestId is required' }));
+            return;
+        }
+
+        getMongoCollection('llmRequests').then(collection => {
+            // Only PENDING moves to PROCESSING — a request the user already
+            // cancelled stays CANCELLED (its eventual result is discarded).
+            // Matching nothing is still 200: redeliveries and races are fine.
+            collection.updateOne(
+                { requestId, status: 'PENDING' },
+                { '$set': { status: 'PROCESSING', processingStartedAt: Date.now() } }
+            ).then(() => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true }));
+            }).catch(() => {
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: 'Database error' }));
+            });
+        }).catch(() => {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: 'Database error' }));
+        });
+    });
+};
+
 module.exports = {
     handleStudioCreateGame,
     handleRenameGame,
@@ -2628,6 +2781,7 @@ module.exports = {
     handleGetLLMStatus,
     handleCancelLLMRequest,
     handleLLMResult,
+    handleLLMStarted,
 };
 
 // ---------------------------------------------------------------------------

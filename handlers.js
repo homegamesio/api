@@ -1836,7 +1836,7 @@ function handleGetGameSourceFile(req, res, gameId) {
 // ---------------------------------------------------------------------------
 
 const path = require('path');
-const localPlay = require('./local-play');
+const localPlay = require('homegames-common/local-play');
 
 // The homegames-client UMD bundle inlined into single-file downloads. In the
 // sibling-repo dev layout this default resolves automatically; deployments

@@ -9,7 +9,9 @@ const { generateId, getHash } = require('./crypto');
 const { getMongoCollection, createAssetRecord, getCertStatus } = require('./db');
 const { publishRequestMessage } = require('./queue');
 
-const getReqBody = (req, cb) => {
+// maxBytes: routes that accept image attachments (AI edit requests) pass a
+// larger cap; everything else keeps the 1MB default.
+const getReqBody = (req, cb, maxBytes = 1000 * 1000) => {
     let earlyReturn = false;
     let _body = '';
 
@@ -19,7 +21,7 @@ const getReqBody = (req, cb) => {
     });
 
     req.on('data', chunk => {
-        if (!earlyReturn && _body.length > (1000 * 1000)) {
+        if (!earlyReturn && _body.length > maxBytes) {
             earlyReturn = true;
             cb && cb(null, 'too large');
         } else if (!earlyReturn) {

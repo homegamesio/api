@@ -96,6 +96,7 @@ const studioLLMModifyRegex = '/studio/games/(\\S*)/llm-modify';
 const studioLLMStatusRegex = '/studio/games/(\\S*)/llm-status';
 const studioLLMCancelRegex = '/studio/games/(\\S*)/llm-cancel';
 const llmResultRegex = '/internal/llm-result';
+const llmStartedRegex = '/internal/llm-started';
 const docsAskRegex = '/docs/ask';
 const docsAskStatusRegex = '/docs/ask/(\\S*)';
 const docsAnswerRegex = '/internal/docs-answer';
@@ -215,6 +216,7 @@ const buildRequestHandlers = (h, s) => ({
         [studioLLMModifyRegex]: { requiresAuth: true, requiresVerified: true, handle: s.handleSubmitLLMRequest },
         [studioLLMCancelRegex]: { requiresAuth: true, handle: s.handleCancelLLMRequest },
         [llmResultRegex]: { handle: s.handleLLMResult },
+        [llmStartedRegex]: { handle: s.handleLLMStarted },
         // Docs assistant: public ask + worker result callback (the handler
         // verifies LLM_WORKER_SECRET itself, like /internal/llm-result).
         [docsAskRegex]: { handle: d.handleAskDocs },

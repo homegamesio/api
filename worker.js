@@ -4,13 +4,17 @@
  * Consumes messages from the `publish_requests` RabbitMQ queue.
  * For each request it:
  *   1. Looks up the game's Forgejo repo
- *   2. Downloads the repo archive at the given commit
- *   3. Checks that `index.js` exists
- *   4. Checks that a GPLv3 LICENSE file exists
- *   5. Runs the game in a sandboxed Docker container (validate.js)
- *      — loads the class, checks metadata, instantiates, runs for 5 seconds
- *   6. On success: creates a `gameVersions` record with `published: true`
- *   7. Updates the `publishRequests` record status
+ *   2. Checks that `index.js` exists and its metadata() parses statically
+ *      (name/squishVersion/services — the facts list endpoints depend on)
+ *   3. Checks that a GPLv3 LICENSE file exists
+ *   4. Checks that a non-trivial README exists
+ *   5. Downloads the repo archive at the given commit and AST-scans every
+ *      JS file for banned patterns
+ *   6. Runs the game in a sandboxed Docker container (validate.js)
+ *      — loads the class, validates metadata, instantiates, squishes the
+ *      full node tree, simulates players/input, runs for 5 seconds
+ *   7. On success: creates a `gameVersions` record with `published: true`
+ *   8. Updates the `publishRequests` record status
  *
  * Run:  node worker.js
  */
@@ -29,7 +33,7 @@ const {
     QUEUE_HOST,
 } = require('./config');
 const { forgejoRequest, downloadArchive } = require('./forgejo');
-const localPlay = require('./local-play');
+const localPlay = require('homegames-common/local-play');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -47,8 +51,6 @@ try {
     console.warn('[worker] Docker validation unavailable:', e.message);
 }
 
-console.log('whahaha');
-console.log(validateGame);
 
 // ---------------------------------------------------------------------------
 // GPLv3 reference text (loaded once at startup)
@@ -95,6 +97,12 @@ const generateId = () => crypto.createHash('md5').update(uuidv4()).digest('hex')
 // Forgejo helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Fetch a file's content at a commit. Returns null ONLY when the file
+ * genuinely doesn't exist (404). Any other failure (Forgejo down, auth,
+ * network) throws — so an infra outage never reads as "file not found"
+ * and wrongly fails a publish.
+ */
 const getFileAtCommit = async (owner, repo, filepath, commitSha) => {
     try {
         const refParam = commitSha ? `?ref=${commitSha}` : '';
@@ -104,13 +112,19 @@ const getFileAtCommit = async (owner, repo, filepath, commitSha) => {
         }
         return null;
     } catch (err) {
-        return null;
+        if (err && err.status === 404) {
+            return null;
+        }
+        const detail = err && (err.message || (err.status && `HTTP ${err.status}`)) || 'unknown error';
+        throw new Error(`Failed to fetch ${filepath} from repository: ${detail}`);
     }
 };
 
 /**
  * Download and extract repo archive to a temp directory.
- * Returns the path to the extracted directory.
+ * Returns { root, dir }: `root` is the temp directory to remove when done,
+ * `dir` is the directory containing the repo contents (the archive's
+ * top-level directory when there is one).
  */
 const downloadAndExtract = async (owner, repo, commitSha) => {
     const archiveBuffer = await downloadArchive(owner, repo, commitSha);
@@ -130,19 +144,34 @@ const downloadAndExtract = async (owner, repo, commitSha) => {
     // tar.gz archives typically contain a top-level directory
     const entries = fs.readdirSync(tmpDir);
     if (entries.length === 1 && fs.statSync(path.join(tmpDir, entries[0])).isDirectory()) {
-        return path.join(tmpDir, entries[0]);
+        return { root: tmpDir, dir: path.join(tmpDir, entries[0]) };
     }
-    return tmpDir;
+    return { root: tmpDir, dir: tmpDir };
 };
 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
-const LICENSE_FILENAMES = ['LICENSE', 'LICENSE.md', 'LICENSE.txt'];
+const LICENSE_FILENAMES = ['LICENSE', 'LICENSE.md', 'LICENSE.txt', 'License', 'License.md', 'license', 'license.md', 'license.txt'];
+const README_FILENAMES = ['README.md', 'README', 'README.txt', 'Readme.md', 'readme.md', 'readme.txt'];
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB — no single source file should be this large
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024; // 20MB total repo size
+const MIN_README_CONTENT_CHARS = 40; // README must say something real, not just a title
+
+/**
+ * Whether README content is substantive: strip markdown headings, dividers,
+ * and whitespace, and require a minimum amount of actual prose.
+ */
+const isSubstantiveReadme = (content) => {
+    const stripped = content
+        .replace(/^#+\s.*$/gm, '')   // headings
+        .replace(/^[-=*_]{3,}\s*$/gm, '') // hr dividers
+        .replace(/\s+/g, ' ')
+        .trim();
+    return stripped.length >= MIN_README_CONTENT_CHARS;
+};
 
 const validatePublishRequest = async (gameId, commitSha) => {
     const games = await getCollection('games');
@@ -173,7 +202,21 @@ const validatePublishRequest = async (gameId, commitSha) => {
         return { success: false, error: 'index.js exceeds maximum file size (5MB)' };
     }
 
-
+    // Static metadata check — list endpoints, local play, and the runner all
+    // depend on metadata() being statically parseable with literal values.
+    // Fail early with a clear message instead of a Docker error later.
+    const sourceMeta = localPlay.parseGameSourceMetadata(indexContent);
+    if (sourceMeta.error) {
+        return { success: false, error: `index.js metadata check failed: ${sourceMeta.error}. metadata() must be a static method returning an object literal.` };
+    }
+    if (!sourceMeta.squishVersion) {
+        return { success: false, error: 'metadata() must include a squishVersion as a string literal (e.g. squishVersion: \'142\')' };
+    }
+    // Note: whether the version is *supported* is enforced inside the runner
+    // image (validate.js) — the image's squish map is the authoritative one.
+    if (!sourceMeta.name) {
+        return { success: false, error: 'metadata() must include a name as a string literal' };
+    }
 
     // -----------------------------------------------------------------------
     // 3. Check GPLv3 license
@@ -202,21 +245,44 @@ const validatePublishRequest = async (gameId, commitSha) => {
     }
 
     // -----------------------------------------------------------------------
-    // 4. Download repo and run Docker validation
+    // 4. Check README — every published game needs real documentation
     // -----------------------------------------------------------------------
-    let extractedPath = null;
+    let readmeContent = null;
+    for (const filename of README_FILENAMES) {
+        readmeContent = await getFileAtCommit(owner, repo, filename, commitSha);
+        if (readmeContent !== null) break;
+    }
+
+    if (readmeContent === null) {
+        return { success: false, error: 'No README found. A README.md describing the game is required.' };
+    }
+    if (!isSubstantiveReadme(readmeContent)) {
+        return { success: false, error: `README is too thin — describe what the game is and how to play it (at least ${MIN_README_CONTENT_CHARS} characters of actual content beyond headings).` };
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Download repo and run Docker validation
+    // -----------------------------------------------------------------------
+    let tmpRoot = null;
     try {
         console.log(`[worker] Downloading archive for ${owner}/${repo} @ ${commitSha.substring(0, 7)}`);
-        extractedPath = await downloadAndExtract(owner, repo, commitSha);
+        const extracted = await downloadAndExtract(owner, repo, commitSha);
+        tmpRoot = extracted.root;
+        const extractedPath = extracted.dir;
 
-        // Check total repo size and collect all JS files
+        // Check total repo size and collect all JS files. lstat (not stat) so
+        // symlinks are never followed — a symlink pointing outside the
+        // extracted tree must not be readable, countable, or scannable.
         let totalSize = 0;
         const jsFiles = [];
+        const symlinks = [];
         const walkDir = (dir) => {
             for (const entry of fs.readdirSync(dir)) {
                 const full = path.join(dir, entry);
-                const stat = fs.statSync(full);
-                if (stat.isDirectory()) {
+                const stat = fs.lstatSync(full);
+                if (stat.isSymbolicLink()) {
+                    symlinks.push(path.relative(extractedPath, full));
+                } else if (stat.isDirectory()) {
                     if (entry !== 'node_modules' && entry !== '.git') walkDir(full);
                 } else {
                     totalSize += stat.size;
@@ -227,6 +293,10 @@ const validatePublishRequest = async (gameId, commitSha) => {
             }
         };
         walkDir(extractedPath);
+
+        if (symlinks.length > 0) {
+            return { success: false, error: `Symbolic links are not allowed in game repositories: ${symlinks.slice(0, 3).join(', ')}` };
+        }
 
         if (totalSize > MAX_TOTAL_SIZE) {
             return { success: false, error: `Repository too large (${(totalSize / 1024 / 1024).toFixed(1)}MB). Maximum is ${MAX_TOTAL_SIZE / 1024 / 1024}MB.` };
@@ -258,10 +328,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
 
         // Run Docker validation if available
         let validationResult = null;
-        // Detect squish version from the source
-        let squishVersion = '135';
-        const squishMatch = indexContent.match(/squishVersion\s*:\s*['"](\w+)['"]/);
-        if (squishMatch) squishVersion = squishMatch[1];
+        const squishVersion = sourceMeta.squishVersion;
 
         if (validateGame) {
             console.log(`[worker] Running Docker validation for ${owner}/${repo}`);
@@ -276,6 +343,10 @@ const validatePublishRequest = async (gameId, commitSha) => {
                 return { success: false, error: `Runtime validation failed: ${validationResult.error}` };
             }
 
+            if (validationResult.warnings && validationResult.warnings.length > 0) {
+                console.log(`[worker] Validation warnings for ${owner}/${repo}:`, validationResult.warnings);
+            }
+
             console.log(`[worker] Docker validation passed for ${owner}/${repo}`);
         } else {
             return { success: false, error: 'Docker validation is required but not available' };
@@ -283,8 +354,7 @@ const validatePublishRequest = async (gameId, commitSha) => {
 
         // Derived from source metadata here at publish time so list endpoints
         // (front page cards) never have to re-derive them from source.
-        const sourceMeta = localPlay.parseGameSourceMetadata(indexContent);
-        const multiplayer = !sourceMeta.error && sourceMeta.services.includes('multiplayer');
+        const multiplayer = sourceMeta.services.includes('multiplayer');
         const localPlayable = localPlay.checkLocalPlayable(sourceMeta).playable;
 
         return {
@@ -293,14 +363,11 @@ const validatePublishRequest = async (gameId, commitSha) => {
             squishVersion: validationResult.squishVersion || squishVersion,
             multiplayer,
             localPlayable,
+            warnings: validationResult.warnings || [],
         };
     } finally {
         // Clean up extracted files
-        if (extractedPath) {
-            // extractedPath might be a subdirectory of the temp dir
-            const tmpRoot = extractedPath.includes('hg-validate-')
-                ? extractedPath.split('hg-validate-')[0] + 'hg-validate-' + extractedPath.split('hg-validate-')[1].split('/')[0]
-                : extractedPath;
+        if (tmpRoot) {
             try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch (e) {}
         }
     }
@@ -315,6 +382,15 @@ const handlePublishRequest = async (message) => {
 
     if (!requestId || !gameId || !commitSha) {
         console.error('[worker] Invalid message — missing requestId, gameId, or commitSha');
+        return;
+    }
+
+    if (!/^[0-9a-f]{7,40}$/i.test(commitSha)) {
+        console.error(`[worker] Invalid commitSha in message: ${String(commitSha).slice(0, 60)}`);
+        const publishRequestsEarly = await getCollection('publishRequests');
+        await publishRequestsEarly.updateOne({ requestId }, {
+            $set: { status: 'FAILED', error: 'Invalid commit SHA', completedAt: Date.now() }
+        });
         return;
     }
 
@@ -367,6 +443,7 @@ const handlePublishRequest = async (message) => {
                 squishVersion: result.squishVersion || null,
                 multiplayer: !!result.multiplayer,
                 localPlayable: !!result.localPlayable,
+                validationWarnings: result.warnings || [],
             });
 
             // Update game record to reflect the latest version's NSFW status
@@ -380,7 +457,7 @@ const handlePublishRequest = async (message) => {
             } });
 
             await publishRequests.updateOne({ requestId }, {
-                $set: { status: 'PUBLISHED', versionId, completedAt: Date.now() }
+                $set: { status: 'PUBLISHED', versionId, completedAt: Date.now(), warnings: result.warnings || [] }
             });
 
             console.log(`[worker] ✓ Published version ${versionId} for game ${gameId} (nsfw=${isNsfw})`);

@@ -89,4 +89,55 @@ const sendPasswordResetEmail = (toEmail, displayName, code) => new Promise((reso
     });
 });
 
-module.exports = { sendVerificationEmail, sendPasswordResetEmail };
+// Notify a developer that their AI game generation/edit finished. Opt-in per
+// request ("email me when it's done" checkbox in the studio). `ok` selects
+// success vs failure wording; on failure `errorMsg` (already user-facing —
+// it's the same string the studio shows) is included so the email is
+// actionable without opening the studio.
+const sendGameGeneratedEmail = (toEmail, displayName, gameName, ok, errorMsg) => new Promise((resolve, reject) => {
+    if (!SES_FROM_ADDRESS) {
+        console.warn(`[email] SES_FROM_ADDRESS not set — skipping game-ready email. ${toEmail}: ${gameName} ok=${ok}`);
+        resolve({ skipped: true });
+        return;
+    }
+
+    const aws = require('aws-sdk');
+    const ses = new aws.SES({ region: SES_REGION });
+
+    const name = displayName || 'there';
+    const game = gameName || 'your game';
+    const studioUrl = 'https://homegames.io/studio.html';
+
+    const subject = ok
+        ? `Your game "${game}" is ready`
+        : `The AI edit for "${game}" failed`;
+    const text = ok
+        ? `Hi ${name},\n\n` +
+          `The AI finished working on "${game}". The result is saved as a new version — ` +
+          `open the studio to review and play it: ${studioUrl}\n`
+        : `Hi ${name},\n\n` +
+          `The AI edit for "${game}" didn't finish successfully` +
+          (errorMsg ? `: ${errorMsg}` : '.') + `\n\n` +
+          `Your game is unchanged. You can try again from the studio: ${studioUrl}\n`;
+    const html = ok
+        ? `<p>Hi ${escapeHtml(name)},</p>` +
+          `<p>The AI finished working on <strong>${escapeHtml(game)}</strong>. The result is saved as a new version — ` +
+          `<a href="${studioUrl}">open the studio</a> to review and play it.</p>`
+        : `<p>Hi ${escapeHtml(name)},</p>` +
+          `<p>The AI edit for <strong>${escapeHtml(game)}</strong> didn't finish successfully` +
+          (errorMsg ? `: ${escapeHtml(errorMsg)}` : '.') + `</p>` +
+          `<p>Your game is unchanged. You can try again from <a href="${studioUrl}">the studio</a>.</p>`;
+
+    ses.sendEmail({
+        Source: SES_FROM_ADDRESS,
+        Destination: { ToAddresses: [toEmail] },
+        Message: {
+            Subject: { Data: subject },
+            Body: { Text: { Data: text }, Html: { Data: html } },
+        },
+    }, (err, data) => {
+        if (err) reject(err); else resolve(data);
+    });
+});
+
+module.exports = { sendVerificationEmail, sendPasswordResetEmail, sendGameGeneratedEmail };

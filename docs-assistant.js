@@ -9,7 +9,7 @@ const { getMongoCollection } = require('./db');
 // Public, unauthenticated Q&A about Homegames and how to make games. Questions
 // are queued as DOCS_QUESTION jobs on the unified homegames-jobs queue; the
 // self-hosted LLM worker answers them grounded in the knowledge doc
-// (homegames-common/docs/homegames-knowledge.md) and posts results back to
+// (homegames-common/docs/homegames-context.md) and posts results back to
 // /internal/docs-answer. The assistant answers questions — it never generates
 // or edits games (AI game edits are gated separately by AI_EDITS_ENABLED).
 //
