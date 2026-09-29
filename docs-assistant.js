@@ -7,7 +7,7 @@ const { getMongoCollection } = require('./db');
 // Docs assistant ("ask something" box on docs.html).
 //
 // Public, unauthenticated Q&A about Homegames and how to make games. Questions
-// are queued as DOCS_QUESTION jobs on the unified homegames-jobs queue; the
+// are queued as DOCS_QUESTION jobs on the dedicated docs queue; the
 // self-hosted LLM worker answers them grounded in the knowledge doc
 // (homegames-common/docs/homegames-context.md) and posts results back to
 // /internal/docs-answer. The assistant answers questions — it never generates
@@ -61,33 +61,12 @@ const rateLimit = (windowMs, max) => {
 const burstLimiter = rateLimit(30 * 1000, 1);            // 1 question per 30s per IP
 const dailyLimiter = rateLimit(24 * 60 * 60 * 1000, 30); // 30 questions per day per IP
 
-const enqueueDocsQuestion = (requestId, question) => new Promise((resolve, reject) => {
-    const amqp = require('amqplib/callback_api');
-    const { QUEUE_HOST, JOB_QUEUE_NAME } = require('./config');
-
-    // frameMax=0 for the same broker-handshake reason as the LLM publish path
-    // (see studio-handlers.js / worker/index.js).
-    amqp.connect(`amqp://${QUEUE_HOST}?frameMax=0`, (cErr, conn) => {
-        if (cErr) { reject(cErr); return; }
-        conn.on('error', (e) => reject(e));
-        conn.createConfirmChannel((chErr, channel) => {
-            if (chErr) {
-                try { conn.close(); } catch (e) {}
-                reject(chErr);
-                return;
-            }
-            channel.assertQueue(JOB_QUEUE_NAME, { durable: true });
-            channel.sendToQueue(
-                JOB_QUEUE_NAME,
-                Buffer.from(JSON.stringify({ type: 'DOCS_QUESTION', requestId, question })),
-                { persistent: true },
-                (confErr) => {
-                    if (confErr) reject(confErr); else resolve();
-                    channel.close(() => { try { conn.close(); } catch (e) {} });
-                }
-            );
-        });
-    });
+const expireDocsQuestions = collection => collection.updateMany(
+    { status: { $in: ['PENDING', 'PROCESSING'] }, created: { $lt: Date.now() - 110000 } },
+    { $set: { status: 'FAILED', error: 'The question timed out. Please try again.', completedAt: Date.now() } }
+);
+const enqueueDocsQuestion = (requestId, question) => require('./job-queue').publishWorkerJob('DOCS_QUESTION', {
+    requestId, question, deadlineAt: Date.now() + 100000,
 });
 
 // POST /docs/ask  { question } -> { requestId, status }
@@ -119,7 +98,7 @@ const handleAskDocs = (req, res) => {
             res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
         }
 
-        const question = (body.question || '').trim();
+        const question = typeof body?.question === 'string' ? body.question.trim() : '';
         if (question.length < 3) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'question is required' }));
@@ -132,7 +111,7 @@ const handleAskDocs = (req, res) => {
         }
 
         getMongoCollection('docsQuestions').then(collection => {
-            collection.countDocuments({ status: { $in: ['PENDING', 'PROCESSING'] } }).then(inFlight => {
+            expireDocsQuestions(collection).then(() => collection.countDocuments({ status: { $in: ['PENDING', 'PROCESSING'] } })).then(inFlight => {
                 if (inFlight >= MAX_IN_FLIGHT) {
                     res.writeHead(503, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: 'The assistant is busy right now — try again in a few minutes' }));
@@ -186,7 +165,7 @@ const handleGetDocsAnswer = (req, res, requestId) => {
     }
 
     getMongoCollection('docsQuestions').then(collection => {
-        collection.findOne({ requestId }).then(record => {
+        expireDocsQuestions(collection).then(() => collection.findOne({ requestId })).then(record => {
             if (!record) {
                 res.writeHead(404);
                 res.end(JSON.stringify({ error: 'No question with that id' }));
@@ -229,8 +208,8 @@ const handleDocsAnswerResult = (req, res) => {
             res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
         }
 
-        const { requestId, status, answer, error } = body;
-        if (!requestId || !['COMPLETED', 'FAILED'].includes(status)) {
+        const { requestId, status, answer, error } = body || {};
+        if (typeof requestId !== 'string' || !/^[\w-]{1,128}$/.test(requestId) || !['COMPLETED', 'FAILED'].includes(status)) {
             res.writeHead(400);
             res.end(JSON.stringify({ error: 'requestId and a valid status are required' }));
             return;
@@ -251,8 +230,10 @@ const handleDocsAnswerResult = (req, res) => {
                 { $set: { ...update, completedAt: Date.now() } }
             ).then(r => {
                 if (r.matchedCount === 0) {
-                    res.writeHead(404);
-                    res.end(JSON.stringify({ error: 'No in-flight question with that id' }));
+                    return collection.findOne({ requestId }).then(record => {
+                        res.writeHead(record ? 200 : 404);
+                        res.end(JSON.stringify(record ? { ok: true, ignored: true } : { error: 'Unknown question' }));
+                    });
                 } else {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true }));

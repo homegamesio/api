@@ -286,17 +286,17 @@ const handlePostCertRequest = (req, res) => {
             res.end('Could not read request body');
             return;
         }
-        let csr;
+        let csr, requestId;
         try {
-            csr = JSON.parse(_body).csr;
+            ({ csr, requestId } = JSON.parse(_body));
         } catch (parseErr) {
             res.writeHead(400, { 'Content-Type': 'text/plain' });
             res.end('Invalid request body');
             return;
         }
-        handleCertRequest(requesterIp, csr).then(() => {
+        handleCertRequest(requesterIp, csr, requestId).then(result => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ submitted: true }));
+            res.end(JSON.stringify(result));
         }).catch(err => {
             console.log('cert request failed: ' + err);
             res.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -831,7 +831,9 @@ const handleGetCertStatus = (req, res) => {
     // Real source IP only — status/cert for a network is readable only from that
     // network, not by anyone supplying a spoofed X-Forwarded-For.
     const requesterIp = getClientIP(req);
-    getCertStatus(requesterIp).then((certStatus) => {
+    const requestId = new URL(req.url, 'http://localhost').searchParams.get('requestId');
+    if (requestId && !/^[\w-]{1,128}$/.test(requestId)) { res.writeHead(400); res.end('Invalid requestId'); return; }
+    getCertStatus(requesterIp, requestId).then((certStatus) => {
         const body = certStatus;
         // The domain this network is allowed to request a cert for. The client
         // needs this to build a CSR with the correct common name, since only we
@@ -843,12 +845,13 @@ const handleGetCertStatus = (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             body.dnsAlias = dnsRecord;
             res.end(JSON.stringify(body));
-        }).catch(err => {
-            res.end(JSON.stringify(err));
+        }).catch(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(body));
         });
-    }).catch(err => {
-        res.writeHead(400);
-        res.end(err);
+    }).catch(() => {
+        res.writeHead(503);
+        res.end('Certificate status temporarily unavailable');
     });
 };
 
@@ -2202,6 +2205,8 @@ function handleGetLocalDownload(req, res, gameId) {
 
         const html = Buffer.from(localPlay.buildLocalHtml({
             name: context.gameName,
+            gameKey: `catalog:${gameId}`,
+            versionId: ref,
             files: context.files,
             entryPoint: context.entryPoint,
             assetBundleBase64: bundle.length ? bundle.toString('base64') : null,

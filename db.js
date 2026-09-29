@@ -698,32 +698,31 @@ const submitContentRequest = (request, ip, createContentRequestFn) => new Promis
     }).catch(reject);
 });
 
-const getCertRecord = (publicIp) => new Promise((resolve, reject) => {
-    getMongoCollection('certs').then((collection) => {
-        collection.findOne({ ip: publicIp }).then((result) => {
-            resolve(result);
-        });
-    });
-});
+const getCertRecord = async (publicIp, requestId) => {
+    const certificates = await getMongoCollection('certificates');
+    const record = await certificates.findOne({ ip: publicIp, ...(requestId ? { _id: requestId } : {}), expiresAt: { $gt: Date.now() } },
+        { sort: { createdAt: -1, expiresAt: -1 } });
+    if (record || requestId) return record;
+    // Read-only compatibility with pre-migration certificates. Never select an
+    // arbitrary old record when several issuances exist for the same IP.
+    return (await getMongoCollection('certs')).findOne({ ip: publicIp, expiresAt: { $gt: Date.now() } }, { sort: { expiresAt: -1 } });
+};
 
-const getCertStatus = (publicIp) => new Promise((resolve, reject) => {
-    const body = {
-        certFound: false,
-        certExpiration: null,
-        certIp: publicIp
-    };
-
-    getCertRecord(publicIp).then((certRecord) => {
-        if (certRecord) {
-            body.certFound = true;
-            body.certExpiration = certRecord.expiresAt;
-            body.cert = certRecord.cert;
-            resolve(body);
-        } else {
-            resolve(body);
-        }
-    });
-});
+const getCertStatus = async (publicIp, requestId) => {
+    const body = { certFound: false, certExpiration: null, certIp: publicIp, requestId: requestId || null };
+    const record = await getCertRecord(publicIp, requestId);
+    if (record) {
+        body.certFound = true;
+        body.certExpiration = record.expiresAt;
+        body.cert = record.cert;
+    } else if (requestId) {
+        const result = await (await getMongoCollection('workerResults')).findOne({ _id: `CERT_REQUEST:${requestId}`, ip: publicIp });
+        // The status endpoint never returns private key material. Completed
+        // certificates themselves remain scoped to both IP and request ID.
+        if (result?.result?.status === 'FAILED') { body.status = 'FAILED'; body.error = result.result.error; }
+    }
+    return body;
+};
 
 const deleteGame = (gameId, searchDeleteFn) => new Promise((resolve, reject) => {
     const afterSearchDelete = () => {

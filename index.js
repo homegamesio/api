@@ -14,7 +14,15 @@ const { getReqBody, getPublicIp, validateServiceRequest } = require('./helpers')
 // Server
 // ---------------------------------------------------------------------------
 
+// Optional integration: the existing API needs no MCP dependencies until enabled.
+const chatgptApp = process.env.CHATGPT_APP_ENABLED === 'true'
+    ? require('./chatgpt-app').createProductionHandler() : null;
+
 const server = http.createServer((req, res) => {
+    if (chatgptApp && chatgptApp.matches(req)) {
+        void chatgptApp.handle(req, res);
+        return;
+    }
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 

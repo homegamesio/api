@@ -52,6 +52,7 @@ const forgejoRequest = (method, path, body, opts) => new Promise((resolve, rejec
 
     const req = http.request(options, (res) => {
         let data = '';
+        res.on('error', reject);
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
             if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -69,6 +70,8 @@ const forgejoRequest = (method, path, body, opts) => new Promise((resolve, rejec
     req.on('error', (e) => {
         reject({ message: e.message });
     });
+    const timeout = setTimeout(() => req.destroy(new Error('Forgejo request timed out')), 30000);
+    req.on('close', () => clearTimeout(timeout));
 
     if (body) {
         req.write(bodyStr);

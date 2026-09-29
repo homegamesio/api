@@ -4,10 +4,15 @@ const CERT_DOMAIN = process.env.CERT_DOMAIN || 'homegames.link';
 
 const JOB_QUEUE_NAME = process.env.JOB_QUEUE_NAME || 'homegames-jobs';
 
-// DEPRECATED: LLM "modify my game" requests now ride the unified
-// JOB_QUEUE_NAME queue as { type: 'LLM_REQUEST', ... } (see
-// handleSubmitLLMRequest). Kept only to avoid breaking any external reference;
-// nothing in this codebase publishes here anymore.
+// Keep these names aligned with worker/lib/config.js. The worker also drains
+// JOB_QUEUE_NAME during rolling upgrades of older API producers.
+const CERT_QUEUE_NAME = process.env.CERT_QUEUE_NAME || `${JOB_QUEUE_NAME}-certs`;
+const LLM_QUEUE_NAME = process.env.LLM_QUEUE_NAME || `${JOB_QUEUE_NAME}-llm`;
+const DOCS_QUEUE_NAME = process.env.DOCS_QUEUE_NAME || `${JOB_QUEUE_NAME}-docs`;
+const workerQueueUrl = new URL(process.env.QUEUE_URL || `amqp://${process.env.QUEUE_HOST || 'localhost'}`);
+workerQueueUrl.searchParams.set('heartbeat', process.env.QUEUE_HEARTBEAT_SECONDS || '30');
+workerQueueUrl.searchParams.set('frameMax', '0');
+const QUEUE_URL = workerQueueUrl.toString();
 
 // Shared secret the self-hosted LLM worker uses to post results back to the
 // API. NOT a user JWT — this authenticates the worker, not a person.
@@ -79,7 +84,7 @@ const MAX_SIZE = 6 * 1024 * 1024;
 
 module.exports = {
     CERT_DOMAIN,
-    JOB_QUEUE_NAME,
+    JOB_QUEUE_NAME, QUEUE_URL, CERT_QUEUE_NAME, LLM_QUEUE_NAME, DOCS_QUEUE_NAME,
     LLM_WORKER_SECRET,
     AI_EDITS_ENABLED,
     DOCS_ASSISTANT_ENABLED,

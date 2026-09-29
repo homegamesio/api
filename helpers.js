@@ -235,71 +235,26 @@ const zipCert = (certData) => new Promise((resolve, reject) => {
 // (public key) — the TLS private key never leaves the client. We still generate
 // the ACME *account* key here (it only authenticates to Let's Encrypt; it is not
 // the cert's key) and hand it to the worker along with the client's CSR.
-const handleCertRequest = (publicIp, csr) => new Promise((resolve, reject) => {
-    if (!CERTS_ENABLED) {
-        reject('Certs not available in this environment');
-    } else if (!csr) {
-        reject('Missing CSR');
-    } else {
-        // SECURITY: the requester picks the CSR's common name, but a network may
-        // only obtain a cert for the subdomain bound to its (trusted) source IP.
-        // Reject any CSR whose CN doesn't match, otherwise a client could request
-        // a valid cert for another network's subdomain.
-        const expectedCommonName = `${getHash(publicIp)}.${CERT_DOMAIN}`;
-        let csrCommonName;
-        try {
-            csrCommonName = acme.crypto.readCsrDomains(csr).commonName;
-        } catch (parseErr) {
-            return reject('Invalid CSR');
-        }
-        if (csrCommonName !== expectedCommonName) {
-            return reject(`CSR common name (${csrCommonName}) does not match the domain assigned to this network (${expectedCommonName})`);
-        }
-
-        getCertStatus(publicIp).then(certInfo => {
-            if (certInfo.cert && certInfo.certExpiration && certInfo.certExpiration > Date.now()) {
-                reject('A valid cert has already been created for this IP (' + publicIp + ').');
-            } else {
-                amqp.connect(`amqp://${QUEUE_HOST}`, (err, conn) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        conn.createChannel((err1, channel) => {
-                            if (err1) {
-                                // Close the connection so a channel-creation failure
-                                // doesn't leak it.
-                                conn.close();
-                                reject(err1);
-                            } else {
-                                channel.assertQueue(JOB_QUEUE_NAME, {
-                                    durable: true
-                                });
-                                acme.crypto.createPrivateKey().then(key => {
-                                    // Queue the CSR as a Buffer so it serializes to the
-                                    // same {type:'Buffer',data:[...]} shape the worker
-                                    // already reads via data.cert.data.
-                                    channel.sendToQueue(JOB_QUEUE_NAME, Buffer.from(JSON.stringify({ type: 'CERT_REQUEST', ip: publicIp, key, cert: Buffer.from(csr) })), { persistent: true });
-                                    // Gracefully close the channel (the close
-                                    // handshake flushes the publish frame) then the
-                                    // connection, so we don't leak one per request.
-                                    channel.close(() => {
-                                        conn.close();
-                                        resolve({ submitted: true });
-                                    });
-                                }).catch(acmeErr => {
-                                    // ACME account-key generation failed — close the
-                                    // connection and reject instead of hanging + leaking.
-                                    conn.close();
-                                    reject(acmeErr);
-                                });
-                            }
-                        });
-                    }
-                });
-            }
-        });
-    }
-});
+const handleCertRequest = async (publicIp, csr, suppliedRequestId) => {
+    if (!CERTS_ENABLED) throw new Error('Certs not available in this environment');
+    const { validateCsr } = require('./cert-policy');
+    const { csrHash } = validateCsr(acme, csr, publicIp, CERT_DOMAIN);
+    const requestId = suppliedRequestId || generateId();
+    if (typeof requestId !== 'string' || !/^[\w-]{1,128}$/.test(requestId)) throw new Error('Invalid requestId');
+    // Bind even a queued request ID to its network and CSR. Repeated client
+    // submissions may enqueue duplicates, which share the worker's durable ID.
+    const requests = await getMongoCollection('certificateRequests');
+    try { await requests.insertOne({ _id: requestId, ip: publicIp, csrHash, createdAt: Date.now() }); }
+    catch (err) { if (err.code !== 11000) throw err; }
+    const registered = await requests.findOne({ _id: requestId });
+    if (registered.ip !== publicIp || registered.csrHash !== csrHash) throw new Error('Certificate request ID already used');
+    const existing = await (await getMongoCollection('certificates')).findOne({ _id: requestId });
+    if (existing && (existing.ip !== publicIp || existing.csrHash !== csrHash)) throw new Error('Certificate request ID already used');
+    if (existing) return { submitted: true, requestId };
+    const key = await acme.crypto.createPrivateKey();
+    await require('./job-queue').publishWorkerJob('CERT_REQUEST', { requestId, ip: publicIp, csrHash, key, cert: Buffer.from(csr) });
+    return { submitted: true, requestId };
+};
 
 const generateSocketId = () => {
     const { v4: uuidv4 } = require('uuid');

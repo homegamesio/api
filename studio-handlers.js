@@ -2204,7 +2204,7 @@ const expireStaleLLMRequests = (collection, gameId) => {
 // ---------------------------------------------------------------------------
 // Submit an LLM "modify my game" request.
 // Fetches the game's current index.js, then enqueues a job containing the
-// source + the user's prompt for the self-hosted MLX worker to process.
+// source + the user's prompt for the self-hosted inference worker to process.
 // ---------------------------------------------------------------------------
 
 const handleSubmitLLMRequest = (req, res, userId, gameId) => {
@@ -2330,73 +2330,18 @@ const handleSubmitLLMRequest = (req, res, userId, gameId) => {
                                 if (images.length) record.imageCount = images.length;
 
                                 collection.insertOne(record).then(() => {
-                                    const amqp = require('amqplib/callback_api');
-                                    const { QUEUE_HOST, JOB_QUEUE_NAME } = require('./config');
-
-                                    let responded = false;
-                                    const respond = (queued) => {
-                                        if (responded) return;
-                                        responded = true;
+                                    require('./job-queue').publishWorkerJob('LLM_REQUEST', {
+                                        requestId, gameId, userId, prompt, baseSha, source: sourceContent,
+                                        mode, images: images.length ? images : undefined,
+                                    }).then(() => {
                                         res.writeHead(200, { 'Content-Type': 'application/json' });
-                                        res.end(JSON.stringify({ requestId, status: 'PENDING', queued }));
-                                    };
-
-                                    // frameMax=0 keeps the broker's offered frame size; with
-                                    // amqplib's 4096 default this broker ECONNRESETs mid-handshake
-                                    // (see worker/index.js). The LLM source can be large, so this
-                                    // matters here more than for the small cert/image publishes.
-                                    amqp.connect(`amqp://${QUEUE_HOST}?frameMax=0`, (cErr, conn) => {
-                                        if (cErr) {
-                                            console.error('Failed to connect to queue', cErr);
-                                            respond(false);
-                                            return;
-                                        }
-
-                                        // Without this, a post-connect socket error throws unhandled.
-                                        conn.on('error', (e) => { console.error('Queue connection error', e); respond(false); });
-
-                                        // Confirm channel: the broker acks receipt, so we only
-                                        // report queued:true and close once the message is durably
-                                        // enqueued. The old fire-and-forget sendToQueue +
-                                        // setTimeout(close, 500) silently dropped large messages
-                                        // whose frames hadn't flushed before the connection closed.
-                                        conn.createConfirmChannel((chErr, channel) => {
-                                            if (chErr) {
-                                                console.error('Failed to create channel', chErr);
-                                                respond(false);
-                                                try { conn.close(); } catch (e) {}
-                                                return;
-                                            }
-
-                                            // LLM jobs ride the unified homegames-jobs queue as a
-                                            // typed message; the consolidated worker dispatches on `type`.
-                                            channel.assertQueue(JOB_QUEUE_NAME, { durable: true });
-                                            channel.sendToQueue(
-                                                JOB_QUEUE_NAME,
-                                                Buffer.from(JSON.stringify({
-                                                    type: 'LLM_REQUEST',
-                                                    requestId,
-                                                    gameId,
-                                                    userId,
-                                                    prompt,
-                                                    baseSha,
-                                                    source: sourceContent,
-                                                    mode,
-                                                    images: images.length ? images : undefined,
-                                                })),
-                                                { persistent: true },
-                                                (confErr) => {
-                                                    if (confErr) {
-                                                        console.error(`LLM publish NACKed for ${requestId}`, confErr);
-                                                        respond(false);
-                                                    } else {
-                                                        console.log(`LLM request ${requestId} enqueued for ${gameId}`);
-                                                        respond(true);
-                                                    }
-                                                    channel.close(() => { try { conn.close(); } catch (e) {} });
-                                                }
-                                            );
-                                        });
+                                        res.end(JSON.stringify({ requestId, status: 'PENDING', queued: true }));
+                                    }).catch(async () => {
+                                        await collection.updateOne({ requestId, status: 'PENDING' }, { $set: {
+                                            status: 'FAILED', error: 'Queue unavailable; please retry', completedAt: Date.now(),
+                                        } }).catch(() => {});
+                                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                                        res.end(JSON.stringify({ requestId, status: 'FAILED', queued: false }));
                                     });
                                 }).catch(insErr => {
                                     console.error('Failed to create LLM request record', insErr);
@@ -2512,8 +2457,8 @@ const handleGetLLMStatus = (req, res, userId, gameId) => {
 
 // ---------------------------------------------------------------------------
 // Cancel an in-flight LLM request. The queued job itself isn't recalled — the
-// worker still runs it — but the record goes CANCELLED, so the result posted
-// back later matches nothing in-flight and is discarded without committing.
+// worker checks this record before inference and every five seconds during it.
+// Saving a result owns a commit lease; cancellation cannot race that commit.
 // ---------------------------------------------------------------------------
 
 const handleCancelLLMRequest = (req, res, userId, gameId) => {
@@ -2541,7 +2486,7 @@ const handleCancelLLMRequest = (req, res, userId, gameId) => {
 
             getMongoCollection('llmRequests').then(collection => {
                 collection.updateOne(
-                    { requestId, gameId, status: { $in: ['PENDING', 'PROCESSING'] } },
+                    { requestId, gameId, status: { $in: ['PENDING', 'PROCESSING'] }, commitOwner: { $exists: false } },
                     { '$set': { status: 'CANCELLED', completedAt: Date.now() } }
                 ).then(r => {
                     if (r.matchedCount === 0) {
@@ -2567,144 +2512,43 @@ const handleCancelLLMRequest = (req, res, userId, gameId) => {
 };
 
 // ---------------------------------------------------------------------------
-// Result ingestion from the self-hosted MLX worker.
+// Result ingestion from the self-hosted inference worker.
 // Authenticated with the shared LLM_WORKER_SECRET, not a user JWT.
 // A COMPLETED result is committed to the game's repo as a new version before
 // the record is marked done — the user's prompt is the commit message, so the
-// version history reads as what they asked for. The studio locks the editor
-// while a request is open, so committing over HEAD is safe.
+// version history reads as what they asked for. A save lease and base-SHA
+// check prevent duplicate commits and overwriting changes made during inference.
 // ---------------------------------------------------------------------------
 
 const handleLLMResult = (req, res) => {
     const { LLM_WORKER_SECRET } = require('./config');
-
-    const auth = req.headers.authorization || '';
-    if (!LLM_WORKER_SECRET || auth !== `Bearer ${LLM_WORKER_SECRET}`) {
-        res.writeHead(401);
-        res.end(JSON.stringify({ error: 'Unauthorized' }));
-        return;
+    if (!LLM_WORKER_SECRET || req.headers.authorization !== `Bearer ${LLM_WORKER_SECRET}`) {
+        res.writeHead(401); res.end(JSON.stringify({ error: 'Unauthorized' })); return;
     }
-
-    getReqBody(req, (_body, err) => {
-        if (err) { res.writeHead(400); res.end('Error reading request'); return; }
-
+    getReqBody(req, (raw, err) => {
         let body;
-        try { body = JSON.parse(_body); } catch (e) {
-            res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
-        }
-
-        const { requestId, status, result, error } = body;
-        if (!requestId || !['COMPLETED', 'FAILED'].includes(status)) {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: 'requestId and a valid status are required' }));
-            return;
-        }
-        if (status === 'COMPLETED' && typeof result !== 'string') {
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: 'result is required for COMPLETED status' }));
-            return;
-        }
-
-        getMongoCollection('llmRequests').then(collection => {
-            // Only in-flight requests accept a result: a job the user cancelled
-            // (or a duplicate delivery) matches nothing and is discarded.
-            const finish = (update, done) => {
-                collection.updateOne(
-                    { requestId, status: { $in: ['PENDING', 'PROCESSING'] } },
-                    { '$set': { ...update, completedAt: Date.now() } }
-                ).then(r => done(null, r.matchedCount > 0)).catch(dbErr => done(dbErr));
-            };
-            // Opt-in "email me when it's done". Fire-and-forget after the
-            // record settles — a mail failure must never fail result
-            // ingestion, and cancelled requests never get here (finish only
-            // matches in-flight records). Re-reads the record so the email
-            // reflects the final status, whichever finish() path set it.
-            const notifyRequester = () => {
-                collection.findOne({ requestId }).then(record => {
-                    if (!record || !record.emailOnComplete) return;
-                    if (record.status !== 'COMPLETED' && record.status !== 'FAILED') return;
-                    Promise.all([
-                        getUserRecord(record.userId),
-                        getGame(record.gameId).catch(() => null),
-                    ]).then(([user, game]) => {
-                        if (!user || !user.email) return;
-                        const { sendGameGeneratedEmail } = require('./email');
-                        sendGameGeneratedEmail(
-                            user.email,
-                            user.displayName,
-                            game && game.name,
-                            record.status === 'COMPLETED',
-                            record.error || null
-                        ).catch(mailErr => {
-                            console.error(`Failed to send game-ready email for ${requestId}`, mailErr);
-                        });
-                    }).catch(lookupErr => {
-                        console.error(`Game-ready email lookup failed for ${requestId}`, lookupErr);
-                    });
-                }).catch(() => {});
-            };
-            const respond = (dbErr, matched) => {
-                if (dbErr) {
-                    res.writeHead(500);
-                    res.end(JSON.stringify({ error: 'Database error' }));
-                } else if (!matched) {
-                    res.writeHead(404);
-                    res.end(JSON.stringify({ error: 'No in-flight request with that id' }));
-                } else {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ ok: true }));
-                    notifyRequester();
-                }
-            };
-
-            if (status === 'FAILED') {
-                finish({ status: 'FAILED', error: error || 'Unknown error' }, respond);
-                return;
-            }
-
-            collection.findOne({ requestId, status: { $in: ['PENDING', 'PROCESSING'] } }).then(record => {
-                if (!record) { respond(null, false); return; }
-
-                getGame(record.gameId).then(game => {
-                    if (!game.forgejoRepo) {
-                        finish({ status: 'FAILED', result, error: 'Game has no repository' }, respond);
-                        return;
-                    }
-                    const [owner, repo] = game.forgejoRepo.split('/');
-                    // The update API needs the file's sha at HEAD (not
-                    // record.baseSha), and index.js may not exist yet for a
-                    // CREATE-mode game — null sha means "create it".
-                    getFileContents(owner, repo, 'index.js')
-                        .then(fileData => fileData.sha)
-                        .catch(() => null)
-                        .then(sha => createOrUpdateFile(owner, repo, 'index.js', result, record.prompt, sha))
-                        .then(commitResult => {
-                            // A cancel that races the commit leaves the record
-                            // CANCELLED with the commit already landed; the user
-                            // can restore the previous version.
-                            finish({
-                                status: 'COMPLETED',
-                                result,
-                                commitSha: commitResult?.commit?.sha || null,
-                            }, respond);
-                        })
-                        .catch(commitErr => {
-                            console.error(`Failed to commit LLM result for ${requestId}`, commitErr);
-                            finish({ status: 'FAILED', result, error: 'The AI edit finished but saving it failed' }, respond);
-                        });
-                }).catch(() => {
-                    finish({ status: 'FAILED', result, error: 'Game not found' }, respond);
-                });
-            }).catch(dbErr => respond(dbErr));
-        }).catch(() => {
-            res.writeHead(500);
-            res.end(JSON.stringify({ error: 'Database error' }));
-        });
-    });
+        try { if (err) throw err; body = JSON.parse(raw); }
+        catch (_) { res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid request' })); return; }
+        require('./llm-results').acceptResult(body, { getMongoCollection, getGame, getFileContents, createOrUpdateFile })
+            .then(async outcome => {
+                res.writeHead(outcome.code, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(outcome.body));
+                if (!outcome.notify) return;
+                // Completion emails remain best effort and only follow the
+                // successful terminal transition, never duplicate callbacks.
+                try {
+                    const record = outcome.notify;
+                    if (!record.emailOnComplete) return;
+                    const [user, game] = await Promise.all([getUserRecord(record.userId), getGame(record.gameId).catch(() => null)]);
+                    if (user?.email) await require('./email').sendGameGeneratedEmail(user.email, user.displayName,
+                        game?.name, record.status === 'COMPLETED', record.error || null);
+                } catch (mailErr) { console.error('Game-ready email failed', mailErr.message); }
+            }).catch(() => { res.writeHead(503); res.end(JSON.stringify({ error: 'Result storage temporarily unavailable' })); });
+    }, 2 * 1000 * 1000);
 };
 
 // ---------------------------------------------------------------------------
-// Job-started signal from the self-hosted MLX worker: marks the request
+// Job-started signal from the self-hosted inference worker: marks the request
 // PROCESSING so the studio's queue view shows "working on your edit" and the
 // stale sweep can tell a running job from one lost in the queue. Best-effort
 // on the worker side — a missed signal just leaves the request PENDING.
@@ -2758,6 +2602,9 @@ const handleLLMStarted = (req, res) => {
 };
 
 module.exports = {
+    // Shared with the ChatGPT adapter; existing Studio handlers are unchanged.
+    ensureForgejoUser,
+    GAME_TEMPLATES,
     handleStudioCreateGame,
     handleRenameGame,
     handleGetTemplates,
