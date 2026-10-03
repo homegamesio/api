@@ -18,6 +18,7 @@ const { getReqBody, getPublicIp, validateServiceRequest } = require('./helpers')
 const chatgptApp = process.env.CHATGPT_APP_ENABLED === 'true'
     ? require('./chatgpt-app').createProductionHandler() : null;
 
+let rtc = null;
 const server = http.createServer((req, res) => {
     if (chatgptApp && chatgptApp.matches(req)) {
         void chatgptApp.handle(req, res);
@@ -25,16 +26,19 @@ const server = http.createServer((req, res) => {
     }
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    if (rtc?.handleRequest(req, res)) return;
 
     const requestHandlers = buildRequestHandlers(handlers, studioHandlers);
     dispatchRequest(req, res, requestHandlers);
 });
 
-// Opt-in while the public infrastructure is rolled out. This only handles
-// private room signaling; games continue to run in their host's browser.
+// Rooms are browser hosts, not Node game processes. Preserve the old session
+// endpoints for older callers. Current website play and Studio use only RTC.
 if (process.env.RTC_ENABLED === 'true') {
-    require('homegames-common/rtc-signaling').attachRtcSignaling(server, {
+    rtc = require('homegames-common/rtc-signaling').attachRtcSignaling(server, {
         trustLoopbackProxy: process.env.RTC_TRUST_PROXY === 'true',
+        resolveGame: handlers.resolveRtcGame,
+        onRoomCreated: handlers.recordRtcSession,
     });
 }
 

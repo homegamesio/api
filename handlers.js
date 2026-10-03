@@ -1957,6 +1957,21 @@ const getLocalPlayContext = (gameId, ref) => {
     return promise;
 };
 
+// Validate the published identity at registration even when its immutable
+// source is cached. Directory titles/capacity never come from host-supplied text.
+const resolveRtcGame = async (gameId, ref) => {
+    await verifyPublishedCommit(gameId, ref);
+    const context = await getLocalPlayContext(gameId, ref);
+    if (!context.playable.playable) throw new Error('Game cannot run in the browser');
+    return { name: context.gameName, maxPlayers: context.meta.maxPlayers,
+        multiplayer: context.meta.services.includes('multiplayer') };
+};
+module.exports.resolveRtcGame = resolveRtcGame;
+module.exports.recordRtcSession = ({ gameId, versionId, visibility }) =>
+    getMongoCollection('sessions').then(sessions => sessions.insertOne({
+        gameId, commitSha: versionId, created: Date.now(), private: visibility === 'private', transport: 'rtc',
+    })).catch(err => console.error('[rtc] session stat write failed:', err.message));
+
 // Builds the binary type-1 asset bundle for a version. Asset reads run in
 // small batches — a game can declare 80+ assets and each read is a Mongo
 // findOne, so an unbounded fan-out would saturate the connection pool.
@@ -2151,7 +2166,7 @@ function handleGetLocalDownload(req, res, gameId) {
     const ref = _requireRef(req, res);
     if (!ref) return;
 
-    const etag = `"download-${gameId}-${ref}"`;
+    const etag = `"download-rtc2-${gameId}-${ref}"`;
     if (req.headers['if-none-match'] === etag) {
         res.writeHead(304, { 'ETag': etag });
         res.end();
@@ -2168,7 +2183,7 @@ function handleGetLocalDownload(req, res, gameId) {
             'Content-Type': 'text/html; charset=utf-8',
             'Content-Length': htmlBuffer.length,
             'Content-Disposition': `attachment; filename="${safeName}-${shortSha}.html"`,
-            'Cache-Control': `public, max-age=${ASSET_CACHE_MAX_AGE}, immutable`,
+            'Cache-Control': 'no-cache',
             'ETag': etag,
         });
         res.end(htmlBuffer);
@@ -2194,8 +2209,7 @@ function handleGetLocalDownload(req, res, gameId) {
         getLocalPlayContext(gameId, ref),
         buildLocalAssetBundle(gameId, ref),
     ]).then(([context, bundle]) => {
-        // Multiplayer games are downloadable (they run as a solo local
-        // session); only structurally-broken games are refused.
+        // Downloads use the same browser host and RTC sharing as Play.
         const downloadable = localPlay.checkDownloadable(context.meta);
         if (!downloadable.downloadable) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
