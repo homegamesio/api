@@ -4,7 +4,9 @@
   "description": "Homegames services and stuff",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/test.js"
+    "test": "node --test test/test.js",
+    "test:worker": "node --test test/worker-reliability.test.js",
+    "test:chatgpt": "npm --prefix chatgpt-app test"
   },
   "repository": {
     "type": "git",
@@ -22,7 +24,7 @@
     "amqplib": "^0.10.4",
     "archiver": "^5.3.0",
     "decompress": "^4.2.1",
-    "homegames-common": "1.5.0",
+    "homegames-common": "^1.7.0",
     "mongodb": "^6.8.0",
     "multiparty": "^4.2.2",
     "nsfwjs": "^4.2.0",

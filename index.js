@@ -30,6 +30,14 @@ const server = http.createServer((req, res) => {
     dispatchRequest(req, res, requestHandlers);
 });
 
+// Opt-in while the public infrastructure is rolled out. This only handles
+// private room signaling; games continue to run in their host's browser.
+if (process.env.RTC_ENABLED === 'true') {
+    require('homegames-common/rtc-signaling').attachRtcSignaling(server, {
+        trustLoopbackProxy: process.env.RTC_TRUST_PROXY === 'true',
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Startup (only when run directly, not when required as a module)
 // ---------------------------------------------------------------------------
