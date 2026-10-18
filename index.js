@@ -1,90 +1,55 @@
-const http = require('http');
-const fs = require('fs');
-const process = require('process');
-
-const config = require('./config');
-const cryptoUtils = require('./crypto');
-const models = require('./models');
-const { dispatchRequest, buildRequestHandlers } = require('./router');
-const handlers = require('./handlers');
-const studioHandlers = require('./studio-handlers');
-const { getReqBody, getPublicIp, validateServiceRequest } = require('./helpers');
-
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
-
-// Optional integration: the existing API needs no MCP dependencies until enabled.
-const chatgptApp = process.env.CHATGPT_APP_ENABLED === 'true'
-    ? require('./chatgpt-app').createProductionHandler() : null;
-
-let rtc = null;
-const server = http.createServer((req, res) => {
-    if (chatgptApp && chatgptApp.matches(req)) {
-        void chatgptApp.handle(req, res);
-        return;
-    }
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-    if (rtc?.handleRequest(req, res)) return;
-
-    const requestHandlers = buildRequestHandlers(handlers, studioHandlers);
-    dispatchRequest(req, res, requestHandlers);
-});
-
-// Rooms are browser hosts, not Node game processes. Preserve the old session
-// endpoints for older callers. Current website play and Studio use only RTC.
-if (process.env.RTC_ENABLED === 'true') {
-    rtc = require('homegames-common/rtc-signaling').attachRtcSignaling(server, {
-        trustLoopbackProxy: process.env.RTC_TRUST_PROXY === 'true',
-        resolveGame: handlers.resolveRtcGame,
-        onRoomCreated: handlers.recordRtcSession,
+const http = require('node:http');
+const { createHandler } = require('./connection-api');
+const { createConnectionService } = require('./connection-service');
+function createServer(options = {}) {
+    const env = options.env || process.env;
+    const service = options.service || createConnectionService(env);
+    const handle = createHandler({ service, trustProxy: env.RTC_TRUST_PROXY === 'true', ...options });
+    let rtc;
+    const server = http.createServer((req,res) => {
+        // Catch both synchronous routing failures and rejected async handlers.
+        // A bad request must not become an unhandled process-level rejection.
+        void Promise.resolve().then(() => {
+            if (!rtc?.handleRequest(req,res)) return handle(req,res);
+        }).catch(() => {
+            if (res.destroyed || res.writableEnded) return;
+            if (res.headersSent) { res.destroy(); return; }
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Internal server error' }));
+        });
     });
+    server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxConnections = 4096;
+    if (options.rtc !== false && env.RTC_ENABLED !== 'false') {
+        const { attachRtcSignaling, iceFromEnv } = require('homegames-common/rtc-signaling');
+        const limit = (name, fallback) => {
+            const value = env[name] === undefined ? fallback : Number(env[name]);
+            if (!Number.isSafeInteger(value) || value < 1 || value > 100000) throw new Error(`Invalid ${name}`);
+            return value;
+        };
+        rtc = attachRtcSignaling(server, { trustLoopbackProxy: env.RTC_TRUST_PROXY === 'true', getIceServers: () => iceFromEnv(env),
+            maxConnectionsPerIp: limit('RTC_CONNECTIONS_PER_IP', 64), connectionsPerMinute: limit('RTC_CONNECTIONS_PER_MINUTE', 120),
+            registrationsPerMinute: limit('RTC_REGISTRATIONS_PER_MINUTE', 60), globalRegistrationsPerMinute: limit('RTC_GLOBAL_REGISTRATIONS_PER_MINUTE', 600) });
+    }
+    let closing;
+    const closeService = () => closing ||= Promise.resolve(service.close?.());
+    server.on('listening', () => service.start?.());
+    server.on('close', () => { rtc?.close?.(); void closeService().catch(() => {}); });
+    server.shutdown = async () => {
+        rtc?.close?.();
+        const closed = new Promise(resolve => server.close(resolve));
+        await Promise.all([closed, closeService()]);
+    };
+    return server;
 }
-
-// ---------------------------------------------------------------------------
-// Startup (only when run directly, not when required as a module)
-// ---------------------------------------------------------------------------
-
 if (require.main === module) {
-    server.listen(process.env.PORT || 80);
+    const server = createServer();
+    server.listen(Number(process.env.PORT || 8004), process.env.BIND_HOST || '127.0.0.1');
+    let stopping = false;
+    const stop = () => {
+        if (stopping) return; stopping = true;
+        const deadline = setTimeout(() => process.exit(1), 45000);
+        server.shutdown().then(() => { clearTimeout(deadline); }, () => { clearTimeout(deadline); process.exitCode = 1; });
+    };
+    process.once('SIGTERM', stop); process.once('SIGINT', stop);
 }
-
-// ---------------------------------------------------------------------------
-// Exports (for testing)
-// ---------------------------------------------------------------------------
-
-module.exports = {
-    // crypto
-    base64UrlEncode: cryptoUtils.base64UrlEncode,
-    base64UrlDecode: cryptoUtils.base64UrlDecode,
-    getSignature: cryptoUtils.getSignature,
-    generateJwt: cryptoUtils.generateJwt,
-    verifyToken: cryptoUtils.verifyToken,
-    hashValue: cryptoUtils.hashValue,
-    hashPassword: cryptoUtils.hashPassword,
-    getHash: cryptoUtils.getHash,
-    generateId: cryptoUtils.generateId,
-
-    // models
-    mapElasticSearchGame: models.mapElasticSearchGame,
-    mapBlogPost: models.mapBlogPost,
-    mapMongoGame: models.mapMongoGame,
-    mapGame: models.mapGame,
-    assetResponse: models.assetResponse,
-    transformS3Response: models.transformS3Response,
-
-    // router
-    dispatchRequest,
-
-    // helpers
-    getPublicIp,
-    getReqBody,
-    validateServiceRequest,
-
-    // config
-    MAX_SIZE: config.MAX_SIZE,
-    HASH_ITERATIONS: config.HASH_ITERATIONS,
-    HASH_KEY_LENGTH: config.HASH_KEY_LENGTH,
-    HASH_DIGEST: config.HASH_DIGEST,
-};
+module.exports = { createServer, createHandler };

@@ -107,13 +107,13 @@ const GAME_TEMPLATES = {
         label: "Blank",
         description: "An empty game with a minimal starting point.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 
 class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'A new Homegames game'
         };
@@ -147,7 +147,7 @@ module.exports = MyGame;
         label: "Click",
         description: "Click anywhere to drop colored squares. Shapes, colors, and clicks.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // Click anywhere to drop a randomly colored square. Demonstrates shapes,
@@ -156,7 +156,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Click anywhere to drop colored squares'
         };
@@ -199,7 +199,7 @@ module.exports = MyGame;
         label: "Keyboard",
         description: "Move a square with arrow keys or WASD. Input plus a tick loop.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // Move a square with the arrow keys or WASD. Demonstrates key input
@@ -208,7 +208,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Move a square with the arrow keys or WASD',
             // 15-30 is the sweet spot: every tick re-broadcasts the whole tree.
@@ -282,7 +282,7 @@ module.exports = MyGame;
         label: "Multiplayer",
         description: "Track players, give each a color, and show a live roster.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // Tracks connected players, gives each a color, and shows a live roster.
@@ -292,7 +292,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Tracks players and gives each their own color'
         };
@@ -389,7 +389,7 @@ module.exports = MyGame;
         label: "Text Input",
         description: "Type into a box and show the text on screen.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // Click the blue box and type — your text shows on screen. Demonstrates
@@ -398,7 +398,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Type into a box and display the text'
         };
@@ -462,7 +462,7 @@ module.exports = MyGame;
         label: "Image Upload",
         description: "Upload an image from your device and display it.",
         files: {
-            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Asset, Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // Click the box to upload an image from your device, then it's drawn on
@@ -531,7 +531,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Upload an image and display it'
         };
@@ -560,7 +560,7 @@ module.exports = MyGame;
         label: "Animation",
         description: "A bouncing, color-cycling square driven by a tick loop.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // A square bounces around the screen and pulses through colors every tick.
@@ -569,7 +569,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'A bouncing, color-cycling square',
             tickRate: 30
@@ -642,7 +642,7 @@ module.exports = MyGame;
         description: "Pan a camera around a world larger than the screen.",
         files: {
             'index.js': 
-`const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils, Asset } = require('squish-142');
+`const { ViewableGame, GameNode, Colors, Shapes, ShapeUtils, ViewUtils, Asset } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // A world larger than the screen; each player pans their own camera with
@@ -651,7 +651,7 @@ class MyGame extends ViewableGame {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Scroll a camera around a large world with WASD',
             assets: {
@@ -752,7 +752,7 @@ module.exports = MyGame;
         label: "Buttons",
         description: "Clickable buttons with labels, and showing/hiding via playerIds.",
         files: {
-            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Colors, Shapes, ShapeUtils } = require('squish-150');
 const COLORS = Colors.COLORS;
 
 // A button is a clickable Shape with a Text label on top (Text nodes can't
@@ -762,7 +762,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 16, y: 9 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Buttons: clickable shapes with text labels'
         };
@@ -838,7 +838,7 @@ module.exports = MyGame;
         label: "Glow & Fade",
         description: "Neon glow with effects.shadow, and fading via color alpha.",
         files: {
-            'index.js': `const { Game, GameNode, Shapes, ShapeUtils } = require('squish-142');
+            'index.js': `const { Game, GameNode, Shapes, ShapeUtils } = require('squish-150');
 
 // Glow comes from effects: { shadow: { color, blur } } on Shape/Asset nodes.
 // Fading uses the color field's alpha (fill alpha renders all-or-nothing).
@@ -846,7 +846,7 @@ class MyGame extends Game {
     static metadata() {
         return {
             aspectRatio: { x: 1, y: 1 },
-            squishVersion: '142',
+            squishVersion: '150',
             author: 'Unknown',
             description: 'Neon glow and fading shapes',
             tickRate: 20
@@ -984,9 +984,9 @@ const handleStudioCreateGame = (req, res, userId) => {
 
         // Commit initial files to the repo after creation (LICENSE + template files)
         const commitInitialFiles = (owner, repo) => new Promise((resolve, reject) => {
-            // Always include GPLv3 LICENSE
-            const gplText = fs.readFileSync(path.join(__dirname, 'gpl-3.0.txt'), 'utf-8');
-            const filesToCommit = [{ path: 'LICENSE', content: gplText }];
+            // New authored projects start with the Homegames MIT notice.
+            const licenseText = fs.readFileSync(path.join(__dirname, 'LICENSE.md'), 'utf-8');
+            const filesToCommit = [{ path: 'LICENSE', content: licenseText }];
 
             // Add template files if a template was selected
             if (template && GAME_TEMPLATES[template]) {

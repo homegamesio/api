@@ -11,9 +11,6 @@
  * Returns: { safe: true } or { safe: false, errors: [{ msg, line, col }] }
  */
 
-const acorn = require('acorn');
-const walk = require('acorn-walk');
-
 // -------------------------------------------------------------------------
 // Built-in modules that game code must never require directly.
 // Relative paths (./foo) and the squish package are allowed.
@@ -52,7 +49,7 @@ const isAllowedRequire = (value) => {
 // -------------------------------------------------------------------------
 // Scan a single source string. Returns { safe, errors }.
 // -------------------------------------------------------------------------
-const scanSource = (source, filename) => {
+const scanSource = (source, filename, { acorn = require('acorn'), walk = require('acorn-walk') } = {}) => {
     const errors = [];
     const addError = (msg, node) => {
         const loc = node.loc ? node.loc.start : { line: '?', column: '?' };

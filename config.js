@@ -50,10 +50,6 @@ const DB_NAME = process.env.DB_NAME || 'homegames';
 
 const JWT_SECRET = process.env.JWT_SECRET || '';
 
-if (!JWT_SECRET) {
-    console.error('Fatal: JWT_SECRET environment variable is not set. Exiting.');
-    process.exit(1);
-}
 
 const AUTH_TYPE = process.env.AUTH_TYPE || 'mongo';
 

@@ -6,7 +6,7 @@
  *   1. Looks up the game's Forgejo repo
  *   2. Checks that `index.js` exists and its metadata() parses statically
  *      (name/squishVersion/services — the facts list endpoints depend on)
- *   3. Checks that a GPLv3 LICENSE file exists
+ *   3. Checks for a complete MIT or legacy GPLv3 LICENSE
  *   4. Checks that a non-trivial README exists
  *   5. Downloads the repo archive at the given commit and AST-scans every
  *      JS file for banned patterns
@@ -53,14 +53,10 @@ try {
 
 
 // ---------------------------------------------------------------------------
-// GPLv3 reference text (loaded once at startup)
+// Supported project licenses (retained hosted publishing only)
 // ---------------------------------------------------------------------------
 
-const GPL3_PATH = path.join(__dirname, 'gpl-3.0.txt');
-const GPL3_TEXT = fs.existsSync(GPL3_PATH) ? fs.readFileSync(GPL3_PATH, 'utf-8') : null;
-
-const normalizeWhitespace = (text) => text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-const GPL3_NORMALIZED = GPL3_TEXT ? normalizeWhitespace(GPL3_TEXT) : null;
+const { supportedProjectLicense } = require('./project-license');
 
 // ---------------------------------------------------------------------------
 // MongoDB
@@ -219,27 +215,26 @@ const validatePublishRequest = async (gameId, commitSha) => {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Check GPLv3 license
+    // 3. Preserve existing GPL projects and accept new MIT projects.
     // -----------------------------------------------------------------------
     let licenseFound = false;
     let licenseError = null;
 
-    if (GPL3_NORMALIZED) {
+    {
         for (const filename of LICENSE_FILENAMES) {
             const licenseContent = await getFileAtCommit(owner, repo, filename, commitSha);
             if (licenseContent !== null) {
-                const normalizedLicense = normalizeWhitespace(licenseContent);
-                if (normalizedLicense === GPL3_NORMALIZED) {
+                if (supportedProjectLicense(licenseContent)) {
                     licenseFound = true;
                     break;
                 } else {
-                    licenseError = `${filename} exists but is not the GPLv3 license`;
+                    licenseError = `${filename} must contain a complete MIT or GPLv3 license`;
                 }
             }
         }
 
         if (!licenseFound) {
-            const error = licenseError || 'No LICENSE file found. A GPLv3 LICENSE file is required.';
+            const error = licenseError || 'No LICENSE file found. A complete MIT or GPLv3 license is required.';
             return { success: false, error };
         }
     }

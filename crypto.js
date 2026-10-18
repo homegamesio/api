@@ -14,6 +14,7 @@ const base64UrlEncode = (obj) => {
 
 const getSignature = (encodedHeader, encodedPayload) => {
     const data = `${encodedHeader}.${encodedPayload}`;
+    if (!JWT_SECRET) throw new Error('Account authentication is unavailable');
     return crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
 };
 
