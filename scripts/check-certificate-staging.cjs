@@ -97,6 +97,17 @@ async function runStaging({ env = process.env, dependencies = {}, log = console.
     };
     log(`Staging state: ${root}\nStaging database: ${state.database}`);
     try {
+        // A completed issuance can outlive a timed-out DNS cleanup. Reuse the
+        // real operator recovery command on THIS run's staging records before
+        // starting the test API. No CA order is created by cleanup.
+        for (const saved of state.requests) {
+            const job = await (await db.collection('certificateRequests')).findOne({ _id: saved.id });
+            if (job?.state === 'COMPLETED' && job.cleanupPending) {
+                log(`Recovering saved DNS cleanup for ${saved.id}`);
+                execFileSync(process.execPath, [path.join(__dirname, 'certificates.js'), 'cleanup', saved.id],
+                    { env: settings, stdio: 'inherit', timeout: 150000 });
+            }
+        }
         await start();
         const initial = await request('/cert-status');
         assert.equal(initial.certificatesEnabled, true);

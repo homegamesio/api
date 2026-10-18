@@ -50,7 +50,10 @@ function createIssuer({ Client = AcmeDnsClient, dns, config, accountKey, now = D
     const nameFor = job => `_acme-challenge.${job.domain}.`;
     async function cleanup(job, challenge) {
         if (challenge.name !== nameFor(job) || !/^[A-Za-z0-9_-]{20,128}$/.test(challenge.value)) throw new Error('Invalid saved DNS challenge');
-        const signal = AbortSignal.timeout(15000);
+        // Route 53 changes commonly need tens of seconds to reach INSYNC.
+        // Keep cleanup bounded, but allow the same propagation window as a
+        // challenge write. A saved challenge remains available after failure.
+        const signal = AbortSignal.timeout(120000);
         const current = await dns.read(challenge.name, signal);
         if (!current) return;
         const remaining = current.ResourceRecords.filter(record => record.Value !== JSON.stringify(challenge.value));
