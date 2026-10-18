@@ -135,7 +135,10 @@ async function runStaging({ env = process.env, dependencies = {}, log = console.
             await verifyHttps(chain, saved.key, state.domain);
             const row = await (await db.collection('certificateRequests')).findOne({ _id: saved.id });
             assert.equal(row.state, 'COMPLETED');
-            assert.equal(row.cleanupPending, false, 'DNS cleanup must finish before accepting the test');
+            // A reused valid authorization never creates a DNS challenge, so
+            // its cleanup flag is absent. A saved challenge must be cleared.
+            assert(row.cleanupPending === false || (row.cleanupPending === undefined && !row.challenge),
+                'DNS cleanup must finish before accepting the test');
             assert.equal(await (await db.collection('certificateAttempts')).countDocuments({ requestId: saved.id }), 1, 'Duplicate submissions must share one issuance attempt');
             certificates.push(chain);
             log(`PASS: server ${index + 1}, duplicate request, matching certificate/key/hostname and HTTPS handshake`);
